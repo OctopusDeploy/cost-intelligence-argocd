@@ -1,18 +1,18 @@
 {
-  "repository": "OctopusDeploy/argocd-cost-intelligence",
+  "repository": "OctopusDeploy/cost-intelligence-argocd",
   "default_branch": "main",
-  "from": "2026-08-05",
-  "to": "2026-11-02",
-  "pull_requests": 124,
+  "from": "2026-08-12",
+  "to": "2026-11-09",
+  "pull_requests": 134,
   "totals": {
-    "landed": 83,
+    "landed": 92,
     "reviewed": 0,
     "reviewed_with_feedback": 0,
     "commented": 0,
-    "merged": 83,
+    "merged": 92,
     "triaged": 0,
-    "maintenance": 30,
-    "authoring_weight": 141.5,
+    "maintenance": 34,
+    "authoring_weight": 155,
     "reviewing_weight": 0
   },
   "size": {
@@ -21,13 +21,13 @@
         "name": "XS",
         "max": 10,
         "weight": 0.5,
-        "landed": 9
+        "landed": 12
       },
       {
         "name": "S",
         "max": 50,
         "weight": 1,
-        "landed": 30
+        "landed": 33
       },
       {
         "name": "M",
@@ -38,46 +38,46 @@
       {
         "name": "L",
         "weight": 3,
-        "landed": 19
+        "landed": 22
       }
     ],
-    "changed_lines": 17788,
-    "excluded_lines": 39,
-    "counted_lines": 17749,
+    "changed_lines": 20495,
+    "excluded_lines": 43,
+    "counted_lines": 20452,
     "unsized": 0,
     "review_feedback_multiplier": 2
   },
   "people": [
     {
       "login": "ppapapetrou76",
-      "landed": 83,
+      "landed": 92,
       "reviewed": 0,
       "reviewed_with_feedback": 0,
       "commented": 0,
-      "merged": 83,
+      "merged": 92,
       "triaged": 0,
-      "maintenance": 30,
-      "total": 166,
-      "authoring_weight": 141.5,
+      "maintenance": 34,
+      "total": 184,
+      "authoring_weight": 155,
       "reviewing_weight": 0
     }
   ],
   "components": [
     {
       "name": "docs",
-      "landed": 24,
-      "touched": 60,
+      "landed": 29,
+      "touched": 67,
       "authors": 1,
       "landed_by": [
         {
           "login": "ppapapetrou76",
-          "landed": 24
+          "landed": 29
         }
       ],
       "median_time_to_merge_hours": 0.1,
-      "opened": 24,
+      "opened": 29,
       "median_first_response_hours": null,
-      "no_response": 24,
+      "no_response": 29,
       "reviews": 0,
       "reviewer_count": 0,
       "top_reviewer": "",
@@ -89,7 +89,7 @@
     {
       "name": "pkg",
       "landed": 17,
-      "touched": 19,
+      "touched": 20,
       "authors": 1,
       "landed_by": [
         {
@@ -111,19 +111,19 @@
     },
     {
       "name": "(root files)",
-      "landed": 13,
-      "touched": 57,
+      "landed": 15,
+      "touched": 64,
       "authors": 1,
       "landed_by": [
         {
           "login": "ppapapetrou76",
-          "landed": 13
+          "landed": 15
         }
       ],
-      "median_time_to_merge_hours": 0.1,
-      "opened": 13,
+      "median_time_to_merge_hours": 0.2,
+      "opened": 15,
       "median_first_response_hours": null,
-      "no_response": 13,
+      "no_response": 15,
       "reviews": 0,
       "reviewer_count": 0,
       "top_reviewer": "",
@@ -135,7 +135,7 @@
     {
       "name": "ui",
       "landed": 11,
-      "touched": 22,
+      "touched": 23,
       "authors": 1,
       "landed_by": [
         {
@@ -157,19 +157,19 @@
     },
     {
       "name": "helm",
-      "landed": 9,
-      "touched": 24,
+      "landed": 10,
+      "touched": 27,
       "authors": 1,
       "landed_by": [
         {
           "login": "ppapapetrou76",
-          "landed": 9
+          "landed": 10
         }
       ],
       "median_time_to_merge_hours": 0.1,
-      "opened": 9,
+      "opened": 10,
       "median_first_response_hours": null,
-      "no_response": 9,
+      "no_response": 10,
       "reviews": 0,
       "reviewer_count": 0,
       "top_reviewer": "",
@@ -180,19 +180,19 @@
     },
     {
       "name": ".github",
-      "landed": 5,
-      "touched": 15,
+      "landed": 6,
+      "touched": 18,
       "authors": 1,
       "landed_by": [
         {
           "login": "ppapapetrou76",
-          "landed": 5
+          "landed": 6
         }
       ],
-      "median_time_to_merge_hours": 0.5,
-      "opened": 5,
+      "median_time_to_merge_hours": 0.3,
+      "opened": 6,
       "median_first_response_hours": null,
-      "no_response": 5,
+      "no_response": 6,
       "reviews": 0,
       "reviewer_count": 0,
       "top_reviewer": "",
@@ -204,7 +204,7 @@
     {
       "name": "scripts",
       "landed": 2,
-      "touched": 8,
+      "touched": 9,
       "authors": 1,
       "landed_by": [
         {
@@ -227,7 +227,7 @@
     {
       "name": "deploy",
       "landed": 1,
-      "touched": 9,
+      "touched": 10,
       "authors": 1,
       "landed_by": [
         {
@@ -250,7 +250,7 @@
     {
       "name": "test",
       "landed": 1,
-      "touched": 4,
+      "touched": 5,
       "authors": 1,
       "landed_by": [
         {
@@ -273,7 +273,7 @@
     {
       "name": "cmd",
       "landed": 0,
-      "touched": 6,
+      "touched": 7,
       "authors": 0,
       "landed_by": [],
       "median_time_to_merge_hours": null,
@@ -293,19 +293,19 @@
     {
       "reason": "branch_commits",
       "label": "PR-branch commits (replaced by one credit per merged PR)",
-      "count": 113,
+      "count": 124,
       "maintenance": false
     },
     {
       "reason": "closed_by_merge",
       "label": "\"Closed\" event fired by every merge",
-      "count": 98,
+      "count": 111,
       "maintenance": false
     },
     {
       "reason": "maintenance_merges",
       "label": "Merges of backport, dependency or bot PRs",
-      "count": 15,
+      "count": 19,
       "maintenance": true
     },
     {
