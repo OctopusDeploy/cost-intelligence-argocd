@@ -4,6 +4,10 @@ All notable changes to this project are listed here. The format follows [Keep a 
 
 ## [Unreleased]
 
+### Added
+
+- A monthly budget per application. Set the `cost-intelligence.octopus.com/monthly-budget` annotation on an Application to a plain number of dollars, and its Cost Intelligence tab compares the projected monthly cost with it, turns amber above 75% and red above 90%, and shows a banner once the cost is over.
+
 ## [0.2.0] - 2026-11-05
 
 ### Changed

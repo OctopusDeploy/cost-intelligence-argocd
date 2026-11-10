@@ -40,6 +40,12 @@ A **CPU request suggestion** appears when pods use less than half of their CPU r
 
 **Cost warning** appears when the monthly Kubernetes cost is more than 30% above the average of the earlier measurements, up to 30 of them, and becomes a **Cost alert** above 100%. It needs at least 3 earlier measurements and flags increases only.
 
+**Budget** compares the monthly cost, including the cloud services estimate, with a monthly budget you set on the application. The cost is a projected month, not what has been spent so far. The row turns amber above 75% of the budget and red above 90%, and a banner appears once the cost is over it.
+
+To set a budget, add the `cost-intelligence.octopus.com/monthly-budget` annotation to the Application, in its manifest or with `kubectl annotate`. The value is a positive number of dollars per month with at most two decimals, such as `500` or `1250.50`. Anything else, such as `500 USD` or `1,000`, shows a note in place of the gauge.
+
+An application without the annotation shows no budget, and neither does a measurement that covers the whole namespace, because that isn't the application's own cost.
+
 ## Resources
 
 ![Resources: cost per controller and Vertical Pod Autoscaler rightsizing suggestions](images/resources.webp)

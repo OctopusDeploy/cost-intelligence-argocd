@@ -22,6 +22,7 @@ export interface CostPanelProps {
   appName: string;
   appCtx?: AppContext;
   managedControllers?: Set<string>;
+  budgetAnnotation?: string;
 }
 
 type TabId = 'actual' | 'resources' | 'trends';
@@ -36,7 +37,7 @@ const TAB_IDS = TABS.map(tab => tab.id);
 
 const ID_PREFIX = 'cost-intel';
 
-export const CostPanel: React.FC<CostPanelProps> = ({ appName, appCtx, managedControllers }) => {
+export const CostPanel: React.FC<CostPanelProps> = ({ appName, appCtx, managedControllers, budgetAnnotation }) => {
   // The open tab lives in the URL, so a link to this view opens on the same tab.
   const [activeTab, setActiveTab] = useUrlState<TabId>('costTab', 'actual', TAB_IDS);
   const { loading, error, data, trend, dailyCosts, refetch } = useCostData(appName, appCtx);
@@ -79,6 +80,7 @@ export const CostPanel: React.FC<CostPanelProps> = ({ appName, appCtx, managedCo
             onShowResources={showResources}
             managedControllers={managedControllers}
             rightsizing={rightsizing}
+            budgetAnnotation={budgetAnnotation}
           />
         )}
         {activeTab === 'resources' && (

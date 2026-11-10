@@ -4,7 +4,7 @@ What we plan to build next, grouped by theme. There are no dates. The order chan
 
 ## Next up
 
-1. Budgets per application: set a monthly budget for an application and see on its cost tab how much of it is spent, with a warning as it gets close and a banner once it is over.
+1. Budgets per application: set a monthly budget for an application and see on its cost tab how the projected monthly cost compares with it, with a warning as it gets close and a banner once it is over.
 2. Storage cost per volume: each PersistentVolumeClaim with its storage class, how much of it is used and what it costs, so oversized or expensive volumes stand out.
 3. Cost impact of a sync: how much a sync changed the estimated cost of an application's cloud services, from the Infracost estimate for the commit it deployed.
 

@@ -2,6 +2,7 @@ import React, { useMemo } from 'react';
 import { CostPanel } from './components/CostPanel';
 import { RemoteClusterPanel } from './components/RemoteClusterPanel';
 import { AppContext } from './utils/api';
+import { BUDGET_ANNOTATION } from './utils/budget';
 import { Destination, otherCluster } from './utils/destination';
 
 // Argo CD Plugin Interface
@@ -21,6 +22,7 @@ export interface ApplicationDetailsTabProps {
     metadata: {
       name: string;
       namespace: string;
+      annotations?: Record<string, string>;
     };
     spec?: {
       project?: string;
@@ -70,7 +72,14 @@ export const CostIntelligenceTab: React.FC<ApplicationDetailsTabProps> = ({
     return <RemoteClusterPanel cluster={cluster} />;
   }
 
-  return <CostPanel appName={appName} appCtx={appCtx} managedControllers={managedControllers} />;
+  return (
+    <CostPanel
+      appName={appName}
+      appCtx={appCtx}
+      managedControllers={managedControllers}
+      budgetAnnotation={application.metadata.annotations?.[BUDGET_ANNOTATION]}
+    />
+  );
 };
 
 // Export default for Argo CD to detect
