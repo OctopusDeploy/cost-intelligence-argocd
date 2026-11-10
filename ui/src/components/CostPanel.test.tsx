@@ -9,8 +9,8 @@ vi.mock('../hooks/useCostData', () => ({ useCostData: vi.fn() }));
 vi.mock('./CostActual', async () => {
   const { createElement } = await vi.importActual<typeof import('react')>('react');
   return {
-    CostActual: ({ onShowResources }: { onShowResources?: () => void }) =>
-      createElement('button', { type: 'button', onClick: onShowResources }, 'actual view'),
+    CostActual: ({ onShowResources, budgetAnnotation }: { onShowResources?: () => void; budgetAnnotation?: string }) =>
+      createElement('button', { type: 'button', onClick: onShowResources, 'data-budget': budgetAnnotation }, 'actual view'),
   };
 });
 vi.mock('./ResourcesTab', () => ({ ResourcesTab: () => 'resources view' }));
@@ -45,6 +45,13 @@ function withMeasurementAge(days: number, measuredHours?: number, record: Partia
 describe('CostPanel', () => {
   beforeEach(() => {
     refetch.mockClear();
+  });
+
+  it('passes the budget annotation to the Actual costs view', () => {
+    withMeasurementAge(1);
+    render(<CostPanel appName="demo" budgetAnnotation="500" />);
+
+    expect(screen.getByRole('button', { name: 'actual view' }).getAttribute('data-budget')).toBe('500');
   });
 
   it('moves between tabs with the arrow keys', () => {

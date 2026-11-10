@@ -333,6 +333,90 @@ describe('CostActual', () => {
     });
   });
 
+  describe('budget', () => {
+    // A monthly cost of $535.60: $488.40 of Kubernetes and a $47.20 cloud estimate.
+    const measured = fixture({ scope: 'application' });
+    const renderBudget = (budgetAnnotation?: string, data: CostData = measured) =>
+      render(<CostActual data={data} trend={null} loading={false} error={null} budgetAnnotation={budgetAnnotation} />);
+    const budgetRow = () => screen.getByText('Budget').parentElement as HTMLElement;
+    const banner = () => screen.queryAllByRole('status').find(el => el.textContent?.includes('Over budget'));
+
+    it('shows nothing for an application without a budget', () => {
+      renderBudget(undefined);
+
+      expect(screen.queryByText('Budget')).toBeNull();
+      expect(screen.queryByRole('meter')).toBeNull();
+    });
+
+    it('compares the headline monthly cost, cloud estimate included, with the budget', () => {
+      renderBudget('1000');
+
+      expect(budgetRow().textContent).toContain('Within budget');
+      expect(budgetRow().textContent).toContain('54% · $535.60 of $1,000.00/mo, projected');
+      expect(banner()).toBeUndefined();
+    });
+
+    it('compares the Kubernetes cost alone when there is no cloud estimate', () => {
+      renderBudget('1000', fixture({ scope: 'application', cloudEstimate: undefined }));
+
+      expect(budgetRow().textContent).toContain('$488.40 of $1,000.00/mo');
+    });
+
+    it.each([
+      ['700', 'Getting close', '77%', 77],
+      ['590', 'Nearly at budget', '91%', 91],
+    ])('at a budget of %s reads %s', (annotation, label, share, now) => {
+      renderBudget(annotation);
+
+      expect(budgetRow().textContent).toContain(label);
+      expect(budgetRow().textContent).toContain(share);
+      expect(screen.getByRole('meter').getAttribute('aria-valuenow')).toBe(String(now));
+      expect(banner()).toBeUndefined();
+    });
+
+    it('fills the meter no further than the budget and adds a banner once over it', () => {
+      renderBudget('500');
+
+      const meter = screen.getByRole('meter', { name: 'Share of budget' });
+      expect(meter.getAttribute('aria-valuenow')).toBe('100');
+      expect(meter.getAttribute('aria-valuetext')).toBe('107% of budget');
+      expect((meter.firstElementChild as HTMLElement).style.width).toBe('100%');
+      expect(budgetRow().textContent).toContain('Over budget');
+      expect(banner()?.textContent).toContain('The projected monthly cost of $535.60 is $35.60 above this application');
+      expect(banner()?.textContent).toContain('$500.00 budget');
+      expect(banner()?.textContent).toContain('cost-intelligence.octopus.com/monthly-budget');
+    });
+
+    it('shows what it expected in place of the gauge for a value it cannot read', () => {
+      renderBudget('500 USD');
+
+      expect(budgetRow().textContent).toContain("value, 500 USD, can't be read");
+      expect(budgetRow().textContent).toContain('such as 500');
+      expect(screen.queryByRole('meter')).toBeNull();
+      expect(banner()).toBeUndefined();
+    });
+
+    it('marks an empty annotation as having no value', () => {
+      renderBudget('');
+
+      expect(budgetRow().textContent).toContain('has no value');
+      expect(screen.queryByRole('meter')).toBeNull();
+    });
+
+    it.each(['namespace', undefined] as const)('shows nothing for a record whose scope is %s', scope => {
+      renderBudget('500', fixture({ scope }));
+
+      expect(screen.queryByText('Budget')).toBeNull();
+      expect(banner()).toBeUndefined();
+    });
+
+    it('shows nothing for a value it cannot read on a record of the namespace', () => {
+      renderBudget('abc', fixture({ scope: 'namespace' }));
+
+      expect(screen.queryByText('Budget')).toBeNull();
+    });
+  });
+
   describe('in a namespace shared with other workloads', () => {
     // worker is the application's; api belongs to something else in the same namespace.
     const latest = fixture({

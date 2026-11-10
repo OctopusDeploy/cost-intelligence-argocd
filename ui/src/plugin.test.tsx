@@ -2,8 +2,11 @@ import React from 'react';
 import { render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ApplicationDetailsTabProps, CostIntelligenceTab } from './plugin';
+import { BUDGET_ANNOTATION } from './utils/budget';
 
-vi.mock('./components/CostPanel', () => ({ CostPanel: () => 'cost views' }));
+vi.mock('./components/CostPanel', () => ({
+  CostPanel: ({ budgetAnnotation }: { budgetAnnotation?: string }) => `cost views, budget ${budgetAnnotation ?? 'none'}`,
+}));
 
 function application(destination: NonNullable<ApplicationDetailsTabProps['application']['spec']>['destination']) {
   return { metadata: { name: 'web', namespace: 'argocd' }, spec: { destination } };
@@ -18,6 +21,23 @@ describe('CostIntelligenceTab', () => {
     render(<CostIntelligenceTab application={application({ server: 'https://kubernetes.default.svc', namespace: 'shop' })} />);
 
     expect(document.body.textContent).toContain('cost views');
+  });
+
+  it('passes on the budget annotation of the application', () => {
+    const app = application({ server: 'https://kubernetes.default.svc', namespace: 'shop' });
+    render(
+      <CostIntelligenceTab
+        application={{ ...app, metadata: { ...app.metadata, annotations: { [BUDGET_ANNOTATION]: '500', other: '7' } } }}
+      />
+    );
+
+    expect(document.body.textContent).toContain('budget 500');
+  });
+
+  it('passes on no budget when the application has no annotations', () => {
+    render(<CostIntelligenceTab application={application({ server: 'https://kubernetes.default.svc', namespace: 'shop' })} />);
+
+    expect(document.body.textContent).toContain('budget none');
   });
 
   it('explains, without asking for costs, that an application on another cluster is not measured', () => {

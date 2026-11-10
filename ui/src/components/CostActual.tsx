@@ -1,5 +1,6 @@
 import React from 'react';
 import { AnomalyNotice } from './AnomalyNotice';
+import { BudgetGauge, OverBudgetNotice } from './Budget';
 import { ChangeDriversCard } from './ChangeDriversCard';
 import { CostBreakdownCard } from './CostBreakdownCard';
 import { EfficiencyCard } from './EfficiencyCard';
@@ -12,6 +13,7 @@ import { useContainerWidth } from '../hooks/useContainerWidth';
 import { useDataQuality } from '../hooks/useDataQuality';
 import { cardStyle, Tokens, useTokens } from '../theme/tokens';
 import { CostData, CostTrend, DataQuality, Rightsizing } from '../utils/api';
+import { readBudget } from '../utils/budget';
 import {
   changeDrivers,
   ChangeDrivers,
@@ -39,6 +41,8 @@ interface CostActualProps {
   managedControllers?: Set<string>;
   // rightsizing is the Vertical Pod Autoscaler's advice, which replaces the CPU suggestion when it has any.
   rightsizing?: Rightsizing | null;
+  // budgetAnnotation is the value of the application's budget annotation, if it has one.
+  budgetAnnotation?: string;
 }
 
 export const CostActual: React.FC<CostActualProps> = ({
@@ -49,6 +53,7 @@ export const CostActual: React.FC<CostActualProps> = ({
   onShowResources,
   managedControllers,
   rightsizing = null,
+  budgetAnnotation,
 }) => {
   const t = useTokens();
   const quality = useDataQuality();
@@ -81,6 +86,10 @@ export const CostActual: React.FC<CostActualProps> = ({
   const previous = earlier && (asApplication(earlier, managedControllers) ?? (measuredAlone ? null : earlier));
   const kubernetes = latest.totalMonthlyCost;
   const cloud = data.cloudEstimate?.totalMonthlyCost ?? 0;
+  // The sum of the two figures as shown, so the Kubernetes cost stays the one on every page.
+  const monthlyCost = sumRounded([kubernetes, cloud]);
+  // A budget is the application's own, so a record that measured the whole namespace can't be held to it.
+  const budget = measuredAlone ? readBudget(budgetAnnotation, monthlyCost) : null;
   const change = costChange(latest, previous);
   const drivers = previous ? changeDrivers(latest, previous) : null;
   const efficiency = data.efficiency;
@@ -126,13 +135,14 @@ export const CostActual: React.FC<CostActualProps> = ({
     <div ref={layoutRef}>
       {data.anomaly && <AnomalyNotice anomaly={data.anomaly} />}
       {shared && <SharedNamespaceNote shared={shared} />}
+      {budget?.kind === 'set' && budget.level === 'over' && <OverBudgetNotice budget={budget} />}
 
       <StatStrip
+        footer={budget ? { label: 'Budget', content: <BudgetGauge budget={budget} /> } : undefined}
         stats={[
           {
             label: 'Monthly cost',
-            // The sum of the two figures as shown, so the Kubernetes cost stays the one on every page.
-            value: formatMoney(sumRounded([kubernetes, cloud])),
+            value: formatMoney(monthlyCost),
             detail:
               cloud > 0
                 ? `Kubernetes ${formatMoney(kubernetes)} + cloud ${formatMoney(cloud)}`

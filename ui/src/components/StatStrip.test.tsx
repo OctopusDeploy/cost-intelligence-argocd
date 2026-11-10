@@ -40,6 +40,24 @@ describe('StatStrip', () => {
     expect(dividers(container)).toEqual([false, true, false, true]);
   });
 
+  it('adds a footer row across the strip without counting it as a stat', () => {
+    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(() => ({ width: 1600 }) as DOMRect);
+    const { container } = render(<StatStrip stats={stats} footer={{ label: 'Budget', content: 'Within budget' }} />);
+
+    const rows = [...(container.querySelector('dl') as HTMLElement).children] as HTMLElement[];
+    expect(rows).toHaveLength(stats.length + 1);
+    const footer = rows[stats.length];
+    expect(footer.style.gridColumn).toContain('-1');
+    expect(footer.querySelector('dt')?.textContent).toBe('Budget');
+    expect(footer.querySelector('dd')?.textContent).toBe('Within budget');
+  });
+
+  it('has only the stats without a footer', () => {
+    const { container } = renderAtWidth(1600);
+
+    expect((container.querySelector('dl') as HTMLElement).children).toHaveLength(stats.length);
+  });
+
   it('stacks the stats when narrow', () => {
     const { container } = renderAtWidth(300);
 

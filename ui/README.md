@@ -68,7 +68,7 @@ Tests sit next to the code as `*.test.ts(x)`. Build configuration: `webpack.conf
 
 - **Octopus Deploy look.** The plugin is a branded panel inside Argo CD's page ("Cost Intelligence by Octopus Deploy"), in Octopus's palette and its Inter font, with bordered cards, an icon tile above each card title, sentence-case labels and outlined buttons. Argo CD's own page around it is unchanged. Inter is bundled (`src/theme/font.ts`, inlined by webpack) because Argo CD serves the extension as one JS file and air-gapped clusters can't reach a font host.
 - **Colours** come from `src/theme/tokens.ts` (`useTokens()`) only; never hardcode one. `cardStyle(t)` is the standard container, `series` the chart palette.
-- **Reuse shared components** before building: `PluginFrame` (root and branded header), `CardHeader` / `IconTile`, `TabBar`, `StatStrip`, `Notice` / `ErrorNotice`, `ReloadButton`, `MeasuredLabel`, `Share`, `AdviceCard`, `Chip`, `levelIcon` / `LEVEL_LABELS`, `icons.tsx`. `BrandMark` is the octoicon from Octopus's official logo pack (octopus.com/company/brand); keep its path as it is.
+- **Reuse shared components** before building: `PluginFrame` (root and branded header), `CardHeader` / `IconTile`, `TabBar`, `StatStrip`, `Notice` / `ErrorNotice` / `Callout`, `ReloadButton`, `MeasuredLabel`, `Share`, `AdviceCard`, `Chip`, `levelIcon` / `LEVEL_LABELS`, `icons.tsx`. `BrandMark` is the octoicon from Octopus's official logo pack (octopus.com/company/brand); keep its path as it is.
 - **Formatting** goes through `src/utils/format.ts` (`formatMoney`, `formatPercent`, ...). Never `toFixed` a currency by hand.
 - The same concept uses the same words and icon on every page, and columns beside a total add up to it.
 
