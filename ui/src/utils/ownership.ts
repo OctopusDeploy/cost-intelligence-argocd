@@ -43,3 +43,14 @@ export function ownsPod(resource: ManagedResource, pod: PodCost): boolean {
       return kind === resource.kind.toLowerCase() && controller === resource.name;
   }
 }
+
+// Kinds whose pods an application's cost is made of, plus bare pods an application manages directly.
+const POD_OWNER_KINDS = new Set(['Deployment', 'StatefulSet', 'DaemonSet', 'Job', 'CronJob', 'ReplicaSet', 'Rollout', 'Pod']);
+
+// podOwners keeps the resources that can own pods, dropping Services, ConfigMaps and the like.
+export const podOwners = (resources: ManagedResource[]): ManagedResource[] =>
+  resources.filter(resource => POD_OWNER_KINDS.has(resource.kind));
+
+// ownedByAny reports whether any of the resources owns the pod.
+export const ownedByAny = (resources: ManagedResource[], pod: PodCost): boolean =>
+  resources.some(resource => ownsPod(resource, pod));

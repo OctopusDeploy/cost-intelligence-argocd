@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { ResourcesTab } from './ResourcesTab';
 import { useOrphanedPods } from '../hooks/useOrphanedPods';
 import { CostData, PodCost } from '../utils/api';
+import { ManagedResource } from '../utils/ownership';
 import { shopRightsizing } from '../test/rightsizing';
 
 vi.mock('../hooks/useOrphanedPods', () => ({ useOrphanedPods: vi.fn() }));
@@ -28,7 +29,10 @@ const data = {
   ],
 } as CostData;
 
-const managed = new Set(['web', 'db']);
+const managed: ManagedResource[] = [
+  { kind: 'Deployment', name: 'web' },
+  { kind: 'StatefulSet', name: 'db' },
+];
 
 const rowHeaders = () => screen.getAllByRole('rowheader').map(cell => cell.textContent);
 
@@ -41,7 +45,7 @@ describe('ResourcesTab', () => {
   });
 
   it("lists this application's controllers, most expensive first, with their share", () => {
-    render(<ResourcesTab data={data} loading={false} error={null} managedControllers={managed} />);
+    render(<ResourcesTab data={data} loading={false} error={null} managedResources={managed} />);
 
     expect(rowHeaders()).toEqual(['db', 'web']);
     expect(screen.getByText('2 controllers · 3 pods · monthly cost')).toBeTruthy();
@@ -50,7 +54,7 @@ describe('ResourcesTab', () => {
   });
 
   it('shows and hides the pods of a controller', () => {
-    render(<ResourcesTab data={data} loading={false} error={null} managedControllers={managed} />);
+    render(<ResourcesTab data={data} loading={false} error={null} managedResources={managed} />);
     const toggle = screen.getByRole('button', { name: 'Pods of web' });
     expect(toggle.getAttribute('aria-expanded')).toBe('false');
 
@@ -74,11 +78,26 @@ describe('ResourcesTab', () => {
         data={measured}
         loading={false}
         error={null}
-        managedControllers={new Set(['web', 'db', 'report'])}
+        managedResources={[...managed, { kind: 'CronJob', name: 'report' }]}
       />
     );
 
     expect(rowHeaders()).toEqual(['db', 'web', 'other', 'report-29312345']);
+  });
+
+  it("keeps the Job pods of the application's CronJob in an older measurement of its namespace", () => {
+    // Argo CD lists the CronJob; OpenCost reports its pods under the Job it ran.
+    const older = { ...data, pods: [...data.pods!, pod('report-29312345-x', 'report-29312345', 'Job', 3)] };
+    render(
+      <ResourcesTab
+        data={older}
+        loading={false}
+        error={null}
+        managedResources={[...managed, { kind: 'CronJob', name: 'report' }]}
+      />
+    );
+
+    expect(rowHeaders()).toEqual(['db', 'web', 'report-29312345']);
   });
 
   it('shows every pod when Argo CD lists no controllers', () => {
@@ -88,7 +107,7 @@ describe('ResourcesTab', () => {
   });
 
   it("explains when none of the pods belong to the application's controllers", () => {
-    render(<ResourcesTab data={data} loading={false} error={null} managedControllers={new Set(['missing'])} />);
+    render(<ResourcesTab data={data} loading={false} error={null} managedResources={[{ kind: 'Deployment', name: 'missing' }]} />);
 
     expect(screen.getByText(/No costs found for this application's controllers/)).toBeTruthy();
   });
@@ -115,7 +134,7 @@ describe('ResourcesTab', () => {
         data={data}
         loading={false}
         error={null}
-        managedControllers={managed}
+        managedResources={managed}
         appName="shop-web"
         appCtx={ctx}
       />
@@ -147,12 +166,12 @@ describe('ResourcesTab', () => {
 
   it("shows the VPA's recommendations below the controllers", () => {
     const { rerender } = render(
-      <ResourcesTab data={data} loading={false} error={null} managedControllers={managed} rightsizing={shopRightsizing()} />
+      <ResourcesTab data={data} loading={false} error={null} managedResources={managed} rightsizing={shopRightsizing()} />
     );
     const section = screen.getByRole('region', { name: 'Rightsizing' });
     expect(section.textContent).toContain('web · Deployment · 3 pods');
 
-    rerender(<ResourcesTab data={data} loading={false} error={null} managedControllers={managed} rightsizing={null} />);
+    rerender(<ResourcesTab data={data} loading={false} error={null} managedResources={managed} rightsizing={null} />);
     expect(screen.queryByRole('region', { name: 'Rightsizing' })).toBeNull();
   });
 });

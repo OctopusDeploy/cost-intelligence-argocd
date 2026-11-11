@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { CostActual } from './CostActual';
 import { useDataQuality } from '../hooks/useDataQuality';
 import { CostData, CostTrend } from '../utils/api';
+import { ManagedResource } from '../utils/ownership';
 import { shopRightsizing } from '../test/rightsizing';
 
 vi.mock('../hooks/useDataQuality', () => ({ useDataQuality: vi.fn() }));
@@ -209,7 +210,7 @@ describe('CostActual', () => {
         pods: [pod('api', 200), pod('worker', 50)],
       });
       render(
-        <CostActual data={latest} trend={trend} loading={false} error={null} managedControllers={new Set(['worker'])} />
+        <CostActual data={latest} trend={trend} loading={false} error={null} managedResources={[{ kind: 'Deployment', name: 'worker' }]} />
       );
 
       expect(stat('Since last sync')).toEqual({
@@ -257,8 +258,11 @@ describe('CostActual', () => {
       efficiency: { ...fixture().efficiency!, cpuIdleCost: 40, ramIdleCost: 15 },
       pods: [pod('worker', 100), pod('report-29312345', 10)],
     });
-    const managed = new Set(['worker', 'report']);
-    const renderAlone = (previous: Partial<CostData> | null, managedControllers: Set<string> = managed) =>
+    const managed: ManagedResource[] = [
+      { kind: 'Deployment', name: 'worker' },
+      { kind: 'CronJob', name: 'report' },
+    ];
+    const renderAlone = (previous: Partial<CostData> | null, managedResources: ManagedResource[] = managed) =>
       render(
         <CostActual
           data={latest}
@@ -266,7 +270,7 @@ describe('CostActual', () => {
           loading={false}
           error={null}
           onShowResources={vi.fn()}
-          managedControllers={managedControllers}
+          managedResources={managedResources}
         />
       );
 
@@ -323,7 +327,7 @@ describe('CostActual', () => {
           totalMonthlyCost: 300,
           pods: [pod('api', 200), pod('worker', 100)],
         },
-        new Set()
+        []
       );
 
       expect(stat('Since last sync')).toEqual({
@@ -347,7 +351,7 @@ describe('CostActual', () => {
           loading={false}
           error={null}
           onShowResources={vi.fn()}
-          managedControllers={new Set(['worker'])}
+          managedResources={[{ kind: 'Deployment', name: 'worker' }]}
         />
       );
 
