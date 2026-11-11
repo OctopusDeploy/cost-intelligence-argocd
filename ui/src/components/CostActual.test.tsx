@@ -588,8 +588,31 @@ describe('CostActual', () => {
 
     const notice = screen.getByRole('status');
     expect(notice.textContent).toContain('Cost alert');
-    expect(notice.textContent).toContain('Cost is 4× the average');
+    expect(notice.textContent).toContain('Cost is 300% above the 5-record average ($120.00/mo)');
     expect(notice.textContent).toContain('Rolling average over the last 5 syncs: $120.00/mo');
+  });
+
+  it('groups the thousands of the average in the anomaly summary', () => {
+    render(
+      <CostActual
+        data={fixture({
+          anomaly: {
+            severity: 'warning',
+            score: 0.516,
+            rollingAvg: 6068.84,
+            recordCount: 3,
+            message: 'Cost is 52% above the 3-record average ($6068.84/mo)',
+          },
+        })}
+        trend={null}
+        loading={false}
+        error={null}
+      />
+    );
+
+    const notice = screen.getByRole('status');
+    expect(notice.textContent).toContain('Cost is 52% above the 3-record average ($6,068.84/mo)');
+    expect(notice.textContent).not.toContain('$6068.84');
   });
 
   it('shows loading, error and empty states', () => {
