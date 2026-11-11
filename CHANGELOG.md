@@ -4,6 +4,11 @@ All notable changes to this project are listed here. The format follows [Keep a 
 
 ## [Unreleased]
 
+### Fixed
+
+- The namespace page now counts the pods of an application's CronJob runs and Argo Rollouts under the application, as its own tab does, instead of listing them as not managed by an Argo CD app.
+- The cost anomaly notice now groups the thousands of the rolling average, like every other amount.
+
 ## [0.2.0] - 2026-11-05
 
 ### Changed

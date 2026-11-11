@@ -99,6 +99,27 @@ describe('splitNamespaceByApp', () => {
     expect(apps.find(app => app.name === 'test-app')?.controllers.map(group => group.name)).toEqual(['guestbook-ui']);
   });
 
+  it("counts a CronJob's Job pods under the app, as the app's own tab does", () => {
+    const job = { ...pod('nightly-report-29906660-24tnl', 'nightly-report-29906660', 21), controllerKind: 'job' };
+    const other = { ...pod('cleanup-1-x', 'nightly-report-weekly', 5), controllerKind: 'job' };
+    const latest = [record('storefront', '2026-11-11T12:25:05Z', [pod('web-5686dd67d9-2nzqd', 'web', 700), job, other])];
+    const storefront = argoApp('storefront', [deployment('web'), { kind: 'CronJob', name: 'nightly-report', namespace: 'argocd' }]);
+    const { apps } = splitNamespaceByApp('argocd', latest, [storefront]);
+
+    expect(apps.map(app => [app.name, app.podCount, app.controllers.map(group => group.name)])).toEqual([
+      ['storefront', 2, ['web', 'nightly-report-29906660']],
+      [null, 1, ['nightly-report-weekly']],
+    ]);
+  });
+
+  it("counts a Rollout's ReplicaSet pods under the app", () => {
+    const replicaSet = { ...pod('api-6f7c9b8d5-x', 'api-6f7c9b8d5', 40), controllerKind: 'replicaset' };
+    const latest = [record('shop', '2026-11-11T12:25:05Z', [replicaSet])];
+    const { apps } = splitNamespaceByApp('argocd', latest, [argoApp('shop', [{ kind: 'Rollout', name: 'api', namespace: 'argocd' }])]);
+
+    expect(apps.map(app => [app.name, app.podCount])).toEqual([['shop', 1]]);
+  });
+
   it('returns nothing without records', () => {
     expect(splitNamespaceByApp('argocd', [], argoApps)).toEqual({ apps: [], totalCost: 0, latest: null });
   });
