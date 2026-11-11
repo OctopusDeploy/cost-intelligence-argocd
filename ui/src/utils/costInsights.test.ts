@@ -98,7 +98,7 @@ describe('sharedNamespace and scopeToApp', () => {
   });
 
   it("narrows a measurement to the application's pods, matching a bare pod by its name", () => {
-    const bare = { ...pod('', 0.05), name: 'debug' };
+    const bare = { ...pod('', 0.05), controllerKind: '', name: 'debug' };
     const scoped = scopeToApp(record([...namespacePods, bare]), [redis, { kind: 'Pod', name: 'debug' }]);
 
     expect(scoped?.pods?.map(p => p.name)).toEqual(['redis-pod', 'redis-pod-2', 'debug']);
@@ -120,7 +120,7 @@ describe('sharedNamespace and scopeToApp', () => {
   });
 
   it('does not count a pod without a controller that shares a Deployment name', () => {
-    const bare = { ...pod('', 0.05), name: 'redis' };
+    const bare = { ...pod('', 0.05), controllerKind: '', name: 'redis' };
 
     expect(scopeToApp(record([pod('redis', 0.4), bare]), [redis])?.pods?.map(p => p.name)).toEqual(['redis-pod']);
   });
