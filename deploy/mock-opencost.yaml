@@ -288,7 +288,7 @@ data:
       const ref = (pod.metadata.ownerReferences || []).find((r) => r.controller);
       if (!ref) return { kind: '', name: '' };
       if (ref.kind === 'ReplicaSet') {
-        const rs = replicaSets.get(ref.name);
+        const rs = replicaSets.get(`${pod.metadata.namespace}/${ref.name}`);
         const parent = rs && (rs.metadata.ownerReferences || []).find((r) => r.controller);
         if (parent && parent.kind === 'Deployment') return { kind: 'deployment', name: parent.name };
       }
@@ -311,6 +311,8 @@ data:
         : 0;
       return {
         name: pod.metadata.name,
+        namespace: pod.metadata.namespace,
+        labels: pod.metadata.labels || {},
         owner: ownerOf(pod, replicaSets),
         start,
         end: done ? Math.max(start, finishedAt) : Infinity,
@@ -329,23 +331,25 @@ data:
 
     const NAMESPACE_NAME = /^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$/;
 
-    // clusterPods lists the namespace's pods that have started, or returns null outside a cluster or when
-    // the API can't be read. Listings with pods are cached for POD_CACHE_MS, as the plugin refreshes every
-    // 30s; an empty one or a failure is not, so a namespace's first pods show up at the next query.
+    // clusterPods lists the namespace's pods that have started, or every namespace's when namespace is
+    // '', or returns null outside a cluster or when the API can't be read. Listings with pods are cached
+    // for POD_CACHE_MS, as the plugin refreshes every 30s; an empty one or a failure is not, so a
+    // namespace's first pods show up at the next query.
     async function clusterPods(namespace) {
-      if (!IN_CLUSTER || !NAMESPACE_NAME.test(namespace)) return null;
+      if (!IN_CLUSTER || (namespace !== '' && !NAMESPACE_NAME.test(namespace))) return null;
       const cached = podCache.get(namespace);
       if (cached && Date.now() - cached.at < POD_CACHE_MS) return cached.pods;
+      const scope = namespace === '' ? '' : `/namespaces/${namespace}`;
       let pods = null;
       try {
         const [podList, rsList] = await Promise.all([
-          kubeGet(`/api/v1/namespaces/${namespace}/pods`),
-          kubeGet(`/apis/apps/v1/namespaces/${namespace}/replicasets`),
+          kubeGet(`/api/v1${scope}/pods`),
+          kubeGet(`/apis/apps/v1${scope}/replicasets`),
         ]);
-        const replicaSets = new Map(rsList.items.map((rs) => [rs.metadata.name, rs]));
+        const replicaSets = new Map(rsList.items.map((rs) => [`${rs.metadata.namespace}/${rs.metadata.name}`, rs]));
         pods = podList.items.filter((pod) => Date.parse(pod.status?.startTime)).map((pod) => describePod(pod, replicaSets));
       } catch (err) {
-        console.error(`Listing pods in ${namespace} failed, serving the fixed pods: ${err.message}`);
+        console.error(`Listing pods in ${namespace || 'the cluster'} failed, serving the fixed pods: ${err.message}`);
       }
       if (pods && pods.length > 0) podCache.set(namespace, { at: Date.now(), pods });
       return pods;
@@ -436,6 +440,58 @@ data:
         };
       }
       return mockCosts[namespace] || mockCosts['default'];
+    }
+
+    // labelKey reports a pod label key the way OpenCost does, sanitized as Prometheus does it:
+    // app.kubernetes.io/name becomes app_kubernetes_io_name.
+    function labelKey(key) {
+      return key.replace(/[^A-Za-z0-9_]/g, '_');
+    }
+
+    // labelPods returns the pods a label query covers: the namespace's when it filters on one, every
+    // namespace's otherwise. It returns null outside a cluster, where the fixed teams are served.
+    async function labelPods(queryParams) {
+      const pods = await clusterPods(queryParams.filter ? namespaceOf(queryParams) : '');
+      return pods && pods.length > 0 ? pods : null;
+    }
+
+    // labelGroups prices each pod over the window and adds it to the group of its value for the label,
+    // sanitized as OpenCost reports it. Pods without the label are __unallocated__, as in OpenCost. Each
+    // group runs from its first pod's start to its last pod's end, and its averages are weighted by how
+    // long each pod ran in that period.
+    function labelGroups(pods, key, windowStr) {
+      const { start, end } = windowRange(windowStr);
+      // Keyed by label values, which may be "constructor" or "toString", so with no prototype.
+      const groups = Object.create(null);
+      for (const pod of pods) {
+        const alloc = Object.values(podAllocations([pod], start, end))[0];
+        if (!alloc) continue;
+        const label = Object.keys(pod.labels).find((k) => labelKey(k) === key);
+        const value = label ? pod.labels[label] : '__unallocated__';
+        const group = groups[value] || (groups[value] = {
+          from: Infinity, to: 0, podHours: [],
+          cpuCoreHours: 0, cpuCost: 0, ramByteHours: 0, ramCost: 0,
+          pvCost: 0, networkCost: 0, loadBalancerCost: 0, totalCost: 0,
+        });
+        for (const field of ['cpuCoreHours', 'cpuCost', 'ramByteHours', 'ramCost', 'pvCost', 'networkCost', 'loadBalancerCost', 'totalCost']) {
+          group[field] += alloc[field];
+        }
+        group.from = Math.min(group.from, Date.parse(alloc.start));
+        group.to = Math.max(group.to, Date.parse(alloc.end));
+        group.podHours.push({ alloc, hours: alloc.minutes / 60 });
+      }
+      for (const group of Object.values(groups)) {
+        const hours = (group.to - group.from) / HOUR_MS;
+        for (const field of ['cpuCoreRequestAverage', 'cpuCoreUsageAverage', 'cpuCoreLimitAverage', 'ramByteRequestAverage', 'ramByteUsageAverage', 'ramByteLimitAverage']) {
+          group[field] = hours > 0 ? group.podHours.reduce((total, p) => total + p.alloc[field] * p.hours, 0) / hours : 0;
+        }
+        group.start = toRFC3339(new Date(group.from));
+        group.end = toRFC3339(new Date(group.to));
+        delete group.from;
+        delete group.to;
+        delete group.podHours;
+      }
+      return groups;
     }
 
     // containersOf lists a pod's containers. A fixed pod has one, named after its controller, with
@@ -574,6 +630,19 @@ data:
             },
           ],
         };
+      } else if (aggregate.startsWith('label:') && costs.labelPods) {
+        // The cluster's pods, grouped by their value for the label.
+        const groups = labelGroups(costs.labelPods, aggregate.slice('label:'.length), queryParams.window);
+        const data = Object.create(null);
+        for (const [value, g] of Object.entries(groups)) {
+          data[value] = {
+            name: value,
+            start: g.start, end: g.end,
+            cpuCoreHours: g.cpuCoreHours, cpuCost: g.cpuCost, ramByteHours: g.ramByteHours, ramCost: g.ramCost,
+            pvCost: g.pvCost, networkCost: g.networkCost, loadBalancerCost: g.loadBalancerCost, totalCost: g.totalCost,
+          };
+        }
+        return { code: 200, data: [data] };
       } else if (aggregate.startsWith('label:')) {
         const now = new Date();
         const start = new Date(now.getTime() - 24 * 60 * 60 * 1000);
@@ -705,6 +774,24 @@ data:
     function handleAllocationSummary(queryParams, costs) {
       const aggregate = queryParams.aggregate || 'namespace';
 
+      if (aggregate.startsWith('label:') && costs.labelPods) {
+        const { start, end } = windowRange(queryParams.window);
+        const win = { start: toRFC3339(new Date(start)), end: toRFC3339(new Date(end)) };
+        const groups = labelGroups(costs.labelPods, aggregate.slice('label:'.length), queryParams.window);
+        const allocations = Object.create(null);
+        for (const [value, g] of Object.entries(groups)) {
+          const requested = g.cpuCoreRequestAverage + g.ramByteRequestAverage / GiB;
+          allocations[value] = {
+            cpuCoreRequestAverage: g.cpuCoreRequestAverage, cpuCoreUsageAverage: g.cpuCoreUsageAverage,
+            cpuCoreLimitAverage: g.cpuCoreLimitAverage, cpuCost: g.cpuCost, cpuCostIdle: 0,
+            ramByteRequestAverage: g.ramByteRequestAverage, ramByteUsageAverage: g.ramByteUsageAverage,
+            ramByteLimitAverage: g.ramByteLimitAverage, ramCost: g.ramCost, ramCostIdle: 0,
+            efficiency: requested > 0 ? (g.cpuCoreUsageAverage + g.ramByteUsageAverage / GiB) / requested : 0,
+          };
+        }
+        return { code: 200, data: { step: (end - start) * 1e6, sets: [{ window: win, allocations }], window: win } };
+      }
+
       if (aggregate.startsWith('label:')) {
         const win = { start: toRFC3339(new Date(Date.now() - 86400000)), end: toRFC3339(new Date()) };
         return {
@@ -804,6 +891,16 @@ data:
       return { status: 'ok', service: 'mock-opencost' };
     }
 
+    // costsForQuery returns costsFor the query's namespace or, for a label query in a cluster, only the
+    // pods it groups, so a query across namespaces doesn't also list and price the default one.
+    async function costsForQuery(query) {
+      if ((query.aggregate || '').startsWith('label:')) {
+        const pods = await labelPods(query);
+        if (pods) return { live: true, pods: [], allocations: {}, labelPods: pods };
+      }
+      return costsFor(namespaceOf(query), query.window);
+    }
+
     // route answers one request.
     async function route(req, res) {
       const parsedUrl = url.parse(req.url, true);
@@ -829,18 +926,20 @@ data:
         res.writeHead(200);
         res.end(JSON.stringify(response));
       } else if (pathname === '/allocation') {
-        const response = handleAllocation(query, await costsFor(namespaceOf(query), query.window));
+        const response = handleAllocation(query, await costsForQuery(query));
         res.writeHead(response.code || 200);
         res.end(JSON.stringify(response));
       } else if (pathname === '/allocation/autocomplete') {
-        // Label keys pods carry, as OpenCost 1.120.3+ reports them (sanitized, so dots become underscores).
+        // Label keys pods carry, as OpenCost 1.120.3+ reports them (sanitized, so dots become underscores):
+        // in a cluster, the keys its pods carry; outside one, a fixed list.
+        const pods = query.field === 'label' ? await labelPods(query) : null;
+        const keys = pods
+          ? [...new Set(pods.flatMap((pod) => Object.keys(pod.labels).map(labelKey)))].sort()
+          : ['app', 'app_kubernetes_io_name', 'cost_center', 'env', 'team'];
         res.writeHead(200);
-        res.end(JSON.stringify({
-          code: 200,
-          data: { data: ['app', 'app_kubernetes_io_name', 'cost_center', 'env', 'team'] },
-        }));
+        res.end(JSON.stringify({ code: 200, data: { data: keys } }));
       } else if (pathname === '/allocation/summary') {
-        const response = handleAllocationSummary(query, await costsFor(namespaceOf(query), query.window));
+        const response = handleAllocationSummary(query, await costsForQuery(query));
         res.writeHead(response.code || 200);
         res.end(JSON.stringify(response));
       } else if (pathname === '/assets') {
