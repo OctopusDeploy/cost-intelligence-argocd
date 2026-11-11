@@ -8,6 +8,7 @@ All notable changes to this project are listed here. The format follows [Keep a 
 
 - The namespace page now counts the pods of an application's CronJob runs and Argo Rollouts under the application, the same way the application's own cost is measured, instead of listing them as not managed by an Argo CD app.
 - The cost anomaly notice now groups the thousands of the rolling average, like every other amount.
+- For an older cost record that covers the whole namespace, an application's tab now counts the pods of its CronJob runs and Argo Rollouts as its own, instead of as other workloads in the namespace. A pod without a controller no longer counts as the application's just because it shares the name of one of its Deployments.
 
 ## [0.2.0] - 2026-11-05
 

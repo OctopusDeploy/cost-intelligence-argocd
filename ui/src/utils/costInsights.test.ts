@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { CostData, EfficiencyMetrics, PodCost } from './api';
+import { ManagedResource } from './ownership';
 import {
   changeDrivers,
   changeSinceLastSync,
@@ -70,11 +71,12 @@ describe('sharedNamespace and scopeToApp', () => {
     pods,
     ...extra,
   });
+  const redis: ManagedResource = { kind: 'Deployment', name: 'redis' };
   const namespacePods = [pod('argocd-redis', 7.4), pod('redis', 0.4), pod('redis', 0.23, 'redis-pod-2'), pod('argocd-server', 0.13)];
 
   it('reports the namespace and the controllers the application does not manage', () => {
     // The record's deployment namespace wins over the pods' when both are known.
-    expect(sharedNamespace(record(namespacePods, { deploymentNamespace: 'platform' }), new Set(['redis']))).toEqual({
+    expect(sharedNamespace(record(namespacePods, { deploymentNamespace: 'platform' }), [redis])).toEqual({
       namespace: 'platform',
       cost: 9.55,
       otherWorkloads: 2,
@@ -82,26 +84,45 @@ describe('sharedNamespace and scopeToApp', () => {
   });
 
   it("falls back to the pods' namespace when the record does not name one", () => {
-    expect(sharedNamespace(record(namespacePods), new Set(['redis']))?.namespace).toBe('argocd');
+    expect(sharedNamespace(record(namespacePods), [redis])?.namespace).toBe('argocd');
   });
 
   it('is null when the application has the namespace to itself, ignoring rounding noise', () => {
-    expect(sharedNamespace(record([pod('redis', 0.63), pod('leftover', 0.0004)]), new Set(['redis']))).toBeNull();
+    expect(sharedNamespace(record([pod('redis', 0.63), pod('leftover', 0.0004)]), [redis])).toBeNull();
   });
 
   it('is null when ownership is unknown', () => {
-    expect(sharedNamespace(record(namespacePods), new Set())).toBeNull();
+    expect(sharedNamespace(record(namespacePods), [])).toBeNull();
     expect(sharedNamespace(record(namespacePods), undefined)).toBeNull();
-    expect(sharedNamespace(record(undefined), new Set(['redis']))).toBeNull();
+    expect(sharedNamespace(record(undefined), [redis])).toBeNull();
   });
 
   it("narrows a measurement to the application's pods, matching a bare pod by its name", () => {
-    const bare = { ...pod('', 0.05), name: 'debug' };
-    const scoped = scopeToApp(record([...namespacePods, bare]), new Set(['redis', 'debug']));
+    const bare = { ...pod('', 0.05), controllerKind: '', name: 'debug' };
+    const scoped = scopeToApp(record([...namespacePods, bare]), [redis, { kind: 'Pod', name: 'debug' }]);
 
     expect(scoped?.pods?.map(p => p.name)).toEqual(['redis-pod', 'redis-pod-2', 'debug']);
     expect(scoped?.totalMonthlyCost).toBeCloseTo(0.68, 10);
-    expect(scopeToApp(record(undefined), new Set(['redis']))).toBeNull();
+    expect(scopeToApp(record(undefined), [redis])).toBeNull();
+  });
+
+  it("counts the pods of the Jobs a CronJob ran as the application's", () => {
+    // Argo CD lists the CronJob; OpenCost reports its pods under the Job it ran.
+    const run = { ...pod('backup-29312345', 0.2), controllerKind: 'job' };
+    const managed: ManagedResource[] = [redis, { kind: 'CronJob', name: 'backup' }];
+
+    expect(sharedNamespace(record([pod('redis', 0.4), run]), managed)).toBeNull();
+    expect(scopeToApp(record([...namespacePods, run]), managed)?.pods?.map(p => p.name)).toEqual([
+      'redis-pod',
+      'redis-pod-2',
+      'backup-29312345-pod',
+    ]);
+  });
+
+  it('does not count a pod without a controller that shares a Deployment name', () => {
+    const bare = { ...pod('', 0.05), controllerKind: '', name: 'redis' };
+
+    expect(scopeToApp(record([pod('redis', 0.4), bare]), [redis])?.pods?.map(p => p.name)).toEqual(['redis-pod']);
   });
 });
 
