@@ -20,7 +20,7 @@ const childOf = (controller: string, parent: string, suffix: RegExp) =>
 
 // ownsPod reports whether a resource Argo CD lists owns a pod OpenCost reports. It is the backend's
 // rule (ManagedResources.OwnsPod), so the namespace page counts the same pods as the application's own
-// tab. OpenCost reports a Deployment's pods under the Deployment and a pod without a controller under
+// cost records. OpenCost reports a Deployment's pods under the Deployment and a pod without a controller under
 // no controller at all. A resource listed without a namespace matches in any namespace.
 export function ownsPod(resource: ManagedResource, pod: PodCost): boolean {
   if (resource.namespace && resource.namespace !== pod.namespace) return false;

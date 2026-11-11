@@ -40,8 +40,8 @@ export interface NamespaceBreakdown {
 const POD_OWNER_KINDS = new Set(['Deployment', 'StatefulSet', 'DaemonSet', 'Job', 'CronJob', 'ReplicaSet', 'Rollout', 'Pod']);
 
 // splitNamespaceByApp counts each pod in a namespace once and assigns it to the Argo CD application
-// that manages its controller, by the same rule as the application's own tab (ownsPod): a CronJob owns
-// the pods of its Jobs and a Rollout those of its ReplicaSets. Every cost record measures the whole
+// that manages its controller, by the rule the backend measures an application's own cost with
+// (ownsPod): a CronJob owns the pods of its Jobs and a Rollout those of its ReplicaSets. Every cost record measures the whole
 // namespace, so pods come from the most recent record only. Pods whose controller no listed
 // application manages form a final group with a null name. A pod claimed by several applications
 // goes to the first by name.
