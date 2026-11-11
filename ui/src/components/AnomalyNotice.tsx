@@ -4,10 +4,12 @@ import { cardStyle, useTokens } from '../theme/tokens';
 import { CostAnomaly } from '../utils/api';
 import { formatMoney } from '../utils/format';
 
-// AnomalyNotice reports a cost that departs from the rolling average of recent syncs.
+// AnomalyNotice reports a cost that departs from the rolling average of recent syncs. The summary is
+// built here rather than taken from the API's message, which formats the average without grouping.
 export const AnomalyNotice: React.FC<{ anomaly: CostAnomaly }> = ({ anomaly }) => {
   const t = useTokens();
   const alert = anomaly.severity === 'alert';
+  const average = `${formatMoney(anomaly.rollingAvg)}/mo`;
 
   return (
     <div
@@ -28,9 +30,11 @@ export const AnomalyNotice: React.FC<{ anomaly: CostAnomaly }> = ({ anomaly }) =
       </span>
       <div style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
         <span style={{ color: t.textStrong, fontWeight: 500 }}>{alert ? 'Cost alert' : 'Cost warning'}</span>
-        <span>{anomaly.message}</span>
+        <span>
+          Cost is {Math.round(anomaly.score * 100)}% above the {anomaly.recordCount}-record average ({average})
+        </span>
         <span style={{ color: t.textMuted, fontSize: '12px' }}>
-          Rolling average over the last {anomaly.recordCount} syncs: {formatMoney(anomaly.rollingAvg)}/mo
+          Rolling average over the last {anomaly.recordCount} syncs: {average}
         </span>
       </div>
     </div>

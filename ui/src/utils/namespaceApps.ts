@@ -1,4 +1,5 @@
 import { CostData, PodCost } from './api';
+import { ManagedResource, ownsPod } from './ownership';
 import { ControllerGroup, groupPodsByController } from './podGroups';
 
 // ArgoApplication is an Argo CD application and the resources it manages, as listed by
@@ -6,7 +7,7 @@ import { ControllerGroup, groupPodsByController } from './podGroups';
 export interface ArgoApplication {
   name: string;
   namespace: string;
-  resources: Array<{ kind: string; name: string; namespace?: string }>;
+  resources: ManagedResource[];
 }
 
 export interface AppCost {
@@ -35,13 +36,15 @@ export interface NamespaceBreakdown {
   latest: CostData | null;
 }
 
-// Kinds OpenCost reports as a pod's controller, plus bare pods an application manages directly.
-const POD_OWNER_KINDS = new Set(['Deployment', 'StatefulSet', 'DaemonSet', 'Job', 'CronJob', 'ReplicaSet', 'Pod']);
+// Kinds whose pods an application's cost is made of, plus bare pods an application manages directly.
+const POD_OWNER_KINDS = new Set(['Deployment', 'StatefulSet', 'DaemonSet', 'Job', 'CronJob', 'ReplicaSet', 'Rollout', 'Pod']);
 
 // splitNamespaceByApp counts each pod in a namespace once and assigns it to the Argo CD application
-// that manages its controller. Every cost record measures the whole namespace, so pods come from the
-// most recent record only. Pods whose controller no listed application manages form a final group
-// with a null name. A pod claimed by several applications goes to the first by name.
+// that manages its controller, by the rule the backend measures an application's own cost with
+// (ownsPod): a CronJob owns the pods of its Jobs and a Rollout those of its ReplicaSets. Every cost record measures the whole
+// namespace, so pods come from the most recent record only. Pods whose controller no listed
+// application manages form a final group with a null name. A pod claimed by several applications
+// goes to the first by name.
 export function splitNamespaceByApp(
   namespace: string,
   records: CostData[],
@@ -61,18 +64,15 @@ export function splitNamespaceByApp(
           app.name === record.applicationName &&
           (!record.applicationNamespace || app.namespace === record.applicationNamespace)
       );
-      const controllers = new Set(
-        (argoApp?.resources ?? [])
-          .filter(resource => POD_OWNER_KINDS.has(resource.kind) && (resource.namespace ?? namespace) === namespace)
-          .map(resource => resource.name)
+      const controllers = (argoApp?.resources ?? []).filter(
+        resource => POD_OWNER_KINDS.has(resource.kind) && (resource.namespace ?? namespace) === namespace
       );
       return { record, argoApp, controllers, pods: [] as PodCost[] };
     });
 
   const unmanaged: PodCost[] = [];
   for (const pod of latest.pods ?? []) {
-    const controller = pod.controller || pod.name;
-    const owner = owners.find(candidate => candidate.controllers.has(controller));
+    const owner = owners.find(candidate => candidate.controllers.some(resource => ownsPod(resource, pod)));
     (owner ? owner.pods : unmanaged).push(pod);
   }
 
