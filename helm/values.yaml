@@ -68,12 +68,12 @@ costIntelligence:
   # - foo.io/cluster=Foo|FooShard
 
   # Pod labels whose values group the pods no Argo CD application manages, in the namespace view
-  # (UNMANAGED_GROUP_LABELS): a group's name is the values present, joined by " / ". The default
-  # lists the CI job pods of GitLab Runner by team and project. [] turns grouping off. Presentation
-  # only: it never assigns cost to an application.
-  unmanagedGroupLabels:
-    - team
-    - project.runner.gitlab.com/name
+  # (UNMANAGED_GROUP_LABELS): a group's name is the values present, joined by " / ". Off by default;
+  # list the labels that tell the pods apart, for example the CI job pods of GitLab Runner by team and
+  # project. Presentation only: it never assigns cost to an application.
+  unmanagedGroupLabels: []
+  # - team
+  # - project.runner.gitlab.com/name
 
   # Extra kinds Argo CD lists that never own pods (NON_OWNER_KINDS), left out of the cost match.
   # Every other kind, custom resources included, may own pods.
@@ -81,11 +81,10 @@ costIntelligence:
 
   # Labels that attribute pods with no controller to the only Application deployed in their namespace
   # (UNOWNED_POD_LABELS), for tools that create bare pods, such as Airflow's Kubernetes executor.
-  # "<label>=<value>" or "<label>" for any value. Empty uses the service's default,
-  # project.runner.gitlab.com/name, which charges GitLab Runner's CI job pods to the Application
-  # that deploys the runner.
+  # "<label>=<value>" or "<label>" for any value. Off by default.
   unownedPodLabels: []
   # - managedby=Airflow
+  # - project.runner.gitlab.com/name   # GitLab Runner's CI job pods, charged to the runner's Application
 
   # PostgreSQL connection pool per replica (DB_MAX_OPEN_CONNS, DB_MAX_IDLE_CONNS). Keep
   # replicas x maxOpenConns below PostgreSQL's max_connections.

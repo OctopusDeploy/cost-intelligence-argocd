@@ -91,7 +91,7 @@ type Config struct {
 	// UnmanagedGroupLabels are the pod labels whose values group the pods no Argo CD application manages
 	// in the namespace view, comma-separated, for example the team and GitLab project of CI job pods.
 	// Presentation only. Empty turns grouping off.
-	UnmanagedGroupLabels string `envconfig:"UNMANAGED_GROUP_LABELS" default:"team,project.runner.gitlab.com/name"`
+	UnmanagedGroupLabels string `envconfig:"UNMANAGED_GROUP_LABELS"`
 
 	// NonOwnerKinds extends the kinds Argo CD lists that never own pods: comma-separated.
 	NonOwnerKinds string `envconfig:"NON_OWNER_KINDS"`
@@ -99,8 +99,7 @@ type Config struct {
 	// UnownedPodLabels attributes the pods that have no controller (bare pods created by Airflow's
 	// Kubernetes executor, for example) to the only application of their namespace when they carry one of
 	// these labels: comma-separated "<label>=<value>" or "<label>". See models.ConfigureUnownedPodLabels.
-	// The default charges GitLab Runner's CI job pods to the application deploying the runner.
-	UnownedPodLabels string `envconfig:"UNOWNED_POD_LABELS" default:"project.runner.gitlab.com/name"`
+	UnownedPodLabels string `envconfig:"UNOWNED_POD_LABELS"`
 
 	// VPAEnabled reads VerticalPodAutoscaler recommendations (from Goldilocks or any VPA) for the
 	// rightsizing advice. It needs the service to run in the cluster with permission to list them.
