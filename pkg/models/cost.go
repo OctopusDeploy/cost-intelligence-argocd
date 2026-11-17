@@ -33,6 +33,10 @@ type CostActual struct {
 	// notifications template that does not send the application's resources. Stored, never sent: the
 	// application routes send ForApplication's view instead.
 	App *AppMeasurement `json:"-"`
+	// OwnedPods are the pods the application's measurement owns, by the backend's own rules (labels
+	// included). Set only on the namespace routes, whose clients split a namespace's pods by application
+	// and must not guess the owners again.
+	OwnedPods []OwnedPod `json:"ownedPods,omitempty"`
 	// Scope says what the cost fields describe: ScopeApplication or ScopeNamespace. Set only by
 	// ForApplication.
 	Scope string `json:"scope,omitempty"`
@@ -82,6 +86,27 @@ type AppMeasurement struct {
 	OpenCostOutput   OpenCostMetrics    `json:"opencostOutput"`
 	Efficiency       *EfficiencyMetrics `json:"efficiency,omitempty"`
 	Pods             []PodCost          `json:"pods"`
+}
+
+// OwnedPod identifies a pod an application's measurement owns.
+type OwnedPod struct {
+	Name           string `json:"name"`
+	Controller     string `json:"controller,omitempty"`
+	ControllerKind string `json:"controllerKind,omitempty"`
+}
+
+// WithOwnedPods returns the record with the pods its application's measurement owns listed. A pod's
+// controller is listed once, so the controllers of pods that have come and gone since are still known.
+func (a CostActual) WithOwnedPods() CostActual {
+	if a.App == nil {
+		return a
+	}
+	view := a
+	view.OwnedPods = make([]OwnedPod, 0, len(a.App.Pods))
+	for _, p := range a.App.Pods {
+		view.OwnedPods = append(view.OwnedPods, OwnedPod{Name: p.Name, Controller: p.Controller, ControllerKind: p.ControllerKind})
+	}
+	return view
 }
 
 // ForApplication returns the record as the application sees it: its own cost, breakdown,
@@ -159,6 +184,9 @@ type NamespaceSummary struct {
 	IdleCost   *float64  `json:"idleCost"`
 	AppCount   int       `json:"appCount"`
 	MeasuredAt time.Time `json:"measuredAt"`
+	// Clusters are the clusters the Applications deploying to the namespace run on, in the cost backend's
+	// names. Set only when the backend measures several.
+	Clusters []string `json:"clusters,omitempty"`
 }
 
 type PodCost struct {
@@ -168,7 +196,14 @@ type PodCost struct {
 	ControllerKind string  `json:"controllerKind"`
 	CPUCost        float64 `json:"cpuCost"`
 	RAMCost        float64 `json:"ramCost"`
-	TotalCost      float64 `json:"totalCost"`
+	// SharedCost is the part of TotalCost that is shared cost spread over the pod (set only when
+	// shared costs are included), not the pod's own usage.
+	SharedCost float64 `json:"sharedCost,omitempty"`
+	TotalCost  float64 `json:"totalCost"`
+	// Group is the value of the configured grouping labels (UNMANAGED_GROUP_LABELS), for listing the
+	// pods no Argo CD application manages by team or project. Presentation only: it never decides
+	// which application owns a pod.
+	Group string `json:"group,omitempty"`
 }
 
 type OrphanedPod struct {
@@ -180,6 +215,8 @@ type OrphanedPod struct {
 	RAMCost        float64 `json:"ramCost"`
 	StorageCost    float64 `json:"storageCost"`
 	TotalCost      float64 `json:"totalCost"`
+	// Labels are the pod's, for the ownership rules that read them. Never sent.
+	Labels map[string]string `json:"-"`
 }
 
 type EfficiencyMetrics struct {
@@ -236,7 +273,10 @@ type AllocationTotal struct {
 	TotalCost              float64            `json:"totalCost"`
 	CarbonCost             float64            `json:"carbonCost"`
 	SharedCost             float64            `json:"sharedCost,omitempty"`
-	SharedCostBreakdown    map[string]float64 `json:"sharedCostBreakdown,omitempty"`
+	// SharedCostIncluded says SharedCost is part of TotalCost (it was asked for: tenancy costs or shared
+	// namespaces). Otherwise SharedCost is only reported and TotalCost leaves it out.
+	SharedCostIncluded  bool               `json:"sharedCostIncluded,omitempty"`
+	SharedCostBreakdown map[string]float64 `json:"sharedCostBreakdown,omitempty"`
 }
 
 type DailyCost struct {

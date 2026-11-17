@@ -531,7 +531,7 @@ func (p *PostgresCostStorage) GetLatestActualsForNamespace(ctx context.Context, 
 	SELECT DISTINCT ON (application_namespace, application_name)
 	    id, application_name, application_namespace, deployment_namespace,
 	    sync_timestamp, measured_on, measured_at, total_monthly_cost,
-	    efficiency_json, pods_json, opencost_output_json
+	    efficiency_json, pods_json, opencost_output_json, app_json
 	FROM cost_actuals
 	WHERE deployment_namespace = $1
 	ORDER BY application_namespace, application_name, measured_at DESC
@@ -546,7 +546,7 @@ func (p *PostgresCostStorage) GetLatestActualsForNamespace(ctx context.Context, 
 	result := []models.CostActual{}
 	for rows.Next() {
 		var actual models.CostActual
-		var efficiencyJSON, podsJSON, opencostJSON sql.NullString
+		var efficiencyJSON, podsJSON, opencostJSON, appJSON sql.NullString
 
 		if err := rows.Scan(
 			&actual.ID,
@@ -560,6 +560,7 @@ func (p *PostgresCostStorage) GetLatestActualsForNamespace(ctx context.Context, 
 			&efficiencyJSON,
 			&podsJSON,
 			&opencostJSON,
+			&appJSON,
 		); err != nil {
 			return nil, fmt.Errorf("failed to scan actual row: %w", err)
 		}
@@ -580,6 +581,9 @@ func (p *PostgresCostStorage) GetLatestActualsForNamespace(ctx context.Context, 
 			if err := json.Unmarshal([]byte(opencostJSON.String), &actual.OpenCostOutput); err != nil {
 				return nil, fmt.Errorf("failed to decode opencost JSON: %w", err)
 			}
+		}
+		if err := decodeAppMeasurement(appJSON, &actual); err != nil {
+			return nil, err
 		}
 
 		result = append(result, actual)

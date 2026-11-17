@@ -16,6 +16,34 @@ type Config struct {
 	Server   ServerConfig   `envconfig:"SERVER"`
 	Database DatabaseConfig `envconfig:"DB"`
 	OpenCost OpenCostConfig `envconfig:"OPENCOST"`
+	// CostProvider is the service OPENCOST_BASE_URL points at: ProviderOpenCost (the default) or
+	// ProviderKubecost, whose API this service reads the same way with a few differences.
+	CostProvider string `envconfig:"COST_PROVIDER" default:"opencost"`
+	// KubecostClusterID is the cluster this service runs in, as Kubecost names it. Required with
+	// ProviderKubecost: a Kubecost aggregator answers for every cluster, and a namespace that exists
+	// in several would otherwise be summed across them.
+	KubecostClusterID string `envconfig:"KUBECOST_CLUSTER_ID"`
+	// KubecostClusterMapFile is a JSON file mapping the other clusters Argo CD deploys to onto their
+	// names in Kubecost, for example a mounted ConfigMap. Without it only the local cluster is measured.
+	KubecostClusterMapFile string `envconfig:"KUBECOST_CLUSTER_MAP_FILE"`
+	// KubecostDiscoverClusters has an Argo CD cluster registered under the name Kubecost itself uses
+	// for it measured without an entry in the map. A name that differs needs an entry.
+	KubecostDiscoverClusters bool `envconfig:"KUBECOST_DISCOVER_CLUSTERS" default:"true"`
+	// KubecostAPIKey is sent with every request to a protected Kubecost aggregator, in the header
+	// KubecostAPIKeyHeader. It is a secret: the chart reads it from a Secret.
+	KubecostAPIKey string `envconfig:"KUBECOST_API_KEY"`
+	// KubecostAPIKeyHeader is the header carrying the key. For Authorization the value is sent as
+	// "Bearer <key>"; for any other header, as the key itself.
+	KubecostAPIKeyHeader string `envconfig:"KUBECOST_API_KEY_HEADER" default:"Authorization"`
+	// KubecostEKSOptimized is for the EKS-optimized Kubecost, which keeps only EKSOptimizedRetentionDays
+	// days: history is read in windows that fit, and the UI aggregates by week, never by month.
+	KubecostEKSOptimized bool `envconfig:"KUBECOST_EKS_OPTIMIZED"`
+	// KubecostShareTenancyCosts spreads Kubecost's tenancy costs (cluster-level costs no namespace
+	// owns) over the allocations, and counts that share in each cost. Off by default.
+	KubecostShareTenancyCosts bool `envconfig:"KUBECOST_SHARE_TENANCY_COSTS"`
+	// KubecostShareNamespaces are namespaces (for example kube-system) whose cost Kubecost spreads over
+	// the other allocations, and counts in each cost. Such a namespace is not measured itself.
+	KubecostShareNamespaces []string `envconfig:"KUBECOST_SHARE_NAMESPACES"`
 	// WebhookSecret is the bearer token Argo CD Notifications must send to POST /on-sync.
 	WebhookSecret string `envconfig:"WEBHOOK_SECRET"`
 
@@ -49,6 +77,25 @@ type Config struct {
 	// PruneRemoteCost deletes the cost records and daily history stored for Argo CD Applications that
 	// deploy to another cluster, at startup and on each daily history run. It can't be undone.
 	PruneRemoteCost bool `envconfig:"PRUNE_REMOTE_COST" default:"false"`
+
+	// OwnerLabels extends the pod labels that name the custom resource owning a pod, for operators that
+	// generate their own StatefulSets or Deployments: comma-separated "<label>=<Kind>|<Kind>", or just
+	// "<label>" for any custom resource. See models.ConfigureOwnership.
+	OwnerLabels string `envconfig:"OWNER_LABELS"`
+
+	// UnmanagedGroupLabels are the pod labels whose values group the pods no Argo CD application manages
+	// in the namespace view, comma-separated, for example the team and GitLab project of CI job pods.
+	// Presentation only. Empty turns grouping off.
+	UnmanagedGroupLabels string `envconfig:"UNMANAGED_GROUP_LABELS" default:"team,project.runner.gitlab.com/name"`
+
+	// NonOwnerKinds extends the kinds Argo CD lists that never own pods: comma-separated.
+	NonOwnerKinds string `envconfig:"NON_OWNER_KINDS"`
+
+	// UnownedPodLabels attributes the pods that have no controller (bare pods created by Airflow's
+	// Kubernetes executor, for example) to the application of their namespace when they carry one of
+	// these labels: comma-separated "<label>=<value>" or "<label>". See models.ConfigureUnownedPodLabels.
+	// The default charges GitLab Runner's CI job pods to the application deploying the runner.
+	UnownedPodLabels string `envconfig:"UNOWNED_POD_LABELS" default:"project.runner.gitlab.com/name"`
 
 	// VPAEnabled reads VerticalPodAutoscaler recommendations (from Goldilocks or any VPA) for the
 	// rightsizing advice. It needs the service to run in the cluster with permission to list them.
@@ -108,6 +155,12 @@ type DatabaseConfig struct {
 	MaxIdle  int    `envconfig:"MAX_IDLE_CONNS" default:"5"`
 }
 
+// The cost providers COST_PROVIDER accepts.
+const (
+	ProviderOpenCost = "opencost"
+	ProviderKubecost = "kubecost"
+)
+
 type OpenCostConfig struct {
 	BaseURL string        `envconfig:"BASE_URL" default:"http://opencost:9003"`
 	Timeout time.Duration `envconfig:"TIMEOUT" default:"10s"`
@@ -160,7 +213,7 @@ func (c *Config) Validate() error {
 		if c.ExporterInterval < time.Minute {
 			return fmt.Errorf("EXPORTER_INTERVAL %s is too short: each refresh queries OpenCost for every namespace, so it must be at least 1m", c.ExporterInterval)
 		}
-		return validateOpenCostURL(c.OpenCost.BaseURL)
+		return c.validateCostBackend()
 	case ModeAPI, "": // the zero value is the API, the default
 	default:
 		return fmt.Errorf("MODE %q is not %q or %q", c.Mode, ModeAPI, ModeExporter)
@@ -188,6 +241,52 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("WEBHOOK_SECRET is required and must be at least %d characters: it authenticates Argo CD Notifications to POST /on-sync", minWebhookSecretLength)
 	}
 
+	return c.validateCostBackend()
+}
+
+// EKSOptimizedRetentionDays is how far back the EKS-optimized Kubecost can be queried.
+const EKSOptimizedRetentionDays = 15
+
+// RetentionDays is how many days back the cost backend can be asked for, 0 when it has no such limit.
+func (c *Config) RetentionDays() int {
+	if c.CostProvider == ProviderKubecost && c.KubecostEKSOptimized {
+		return EKSOptimizedRetentionDays
+	}
+	return 0
+}
+
+// APIKeyHeader is the header name and value that carry the Kubecost API key, empty without a key.
+func (c *Config) APIKeyHeader() (name, value string) {
+	if c.CostProvider != ProviderKubecost || c.KubecostAPIKey == "" {
+		return "", ""
+	}
+	name = c.KubecostAPIKeyHeader
+	if name == "" {
+		name = "Authorization"
+	}
+	if strings.EqualFold(name, "Authorization") {
+		return name, "Bearer " + c.KubecostAPIKey
+	}
+	return name, c.KubecostAPIKey
+}
+
+// validateCostBackend checks the cost provider and the URL it is reached at.
+func (c *Config) validateCostBackend() error {
+	switch c.CostProvider {
+	case ProviderOpenCost, "":
+	case ProviderKubecost:
+		if c.KubecostClusterID == "" {
+			return errors.New("KUBECOST_CLUSTER_ID is required with COST_PROVIDER=kubecost: Kubecost answers for every cluster it knows, and the namespaces of the others would be counted as this cluster's")
+		}
+	default:
+		return fmt.Errorf("COST_PROVIDER %q is not %q or %q", c.CostProvider, ProviderOpenCost, ProviderKubecost)
+	}
+	if c.CostProvider != ProviderKubecost && (c.KubecostEKSOptimized || c.KubecostAPIKey != "") {
+		return errors.New("KUBECOST_EKS_OPTIMIZED and KUBECOST_API_KEY only apply with COST_PROVIDER=kubecost")
+	}
+	if c.KubecostAPIKey != "" && !validHeaderName(c.KubecostAPIKeyHeader) {
+		return fmt.Errorf("KUBECOST_API_KEY_HEADER %q is not a valid header name", c.KubecostAPIKeyHeader)
+	}
 	return validateOpenCostURL(c.OpenCost.BaseURL)
 }
 
@@ -208,4 +307,14 @@ func validateOpenCostURL(rawURL string) error {
 		return errors.New("opencost base URL must include a hostname")
 	}
 	return nil
+}
+
+// validHeaderName reports whether name can be an HTTP header field name; empty means Authorization.
+func validHeaderName(name string) bool {
+	for _, r := range name {
+		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-' || r == '_') {
+			return false
+		}
+	}
+	return true
 }

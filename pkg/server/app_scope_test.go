@@ -228,6 +228,36 @@ func TestHandleGetAppOrphanedPods_OnlyTheApplicationsPods(t *testing.T) {
 	assert.Equal(t, "test-cronjob-29123456-x", got.OrphanedPods[0].Name)
 }
 
+func TestHandleGetAppOrphanedPods_PodsOwnedByLabel(t *testing.T) {
+	t.Parallel()
+
+	orphan := func(pod, kind, controller string, labels map[string]string) opencost.AllocationData {
+		return opencost.AllocationData{
+			PVCost: 0.01, TotalCost: 0.01,
+			Properties: opencost.AllocationProperties{Namespace: "argocd", Pod: pod, ControllerKind: kind, Controller: controller, Labels: labels},
+		}
+	}
+	record := redisRecord("r2", 9.55, 0.63, true)
+	record.App.Controllers = models.ManagedResources{{Kind: "ClickHouseInstallation", Name: "clickhouse", Namespace: "argocd"}}
+	store := &mockStorage{
+		getLatestActualFn: func(context.Context, models.AppRef) (*models.CostActual, error) { return record, nil },
+	}
+	srv := newScopedTestServer(t, store, func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(opencost.AllocationResponse{Code: 200, Data: []map[string]opencost.AllocationData{{
+			"chi-pod": orphan("chi-clickhouse-0-0-0", "statefulset", "chi-clickhouse-0-0", map[string]string{"clickhouse_altinity_com_chi": "clickhouse"}),
+			"other":   orphan("argocd-dex-x", "deployment", "argocd-dex-server", map[string]string{"app": "dex"}),
+		}}})
+	})
+
+	var got struct {
+		OrphanedPods []models.OrphanedPod `json:"orphanedPods"`
+	}
+	getJSON(t, srv, "/api/cost-analysis/redis/orphaned-pods", &got)
+
+	require.Len(t, got.OrphanedPods, 1)
+	assert.Equal(t, "chi-clickhouse-0-0-0", got.OrphanedPods[0].Name)
+}
+
 func TestHandleGetDailyCosts_AsksOpenCostForTheRequestedDays(t *testing.T) {
 	t.Parallel()
 

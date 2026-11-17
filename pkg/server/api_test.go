@@ -20,6 +20,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/OctopusDeploy/cost-intelligence-argocd/pkg/exporter"
 	"github.com/OctopusDeploy/cost-intelligence-argocd/pkg/hook"
 	"github.com/OctopusDeploy/cost-intelligence-argocd/pkg/models"
 	"github.com/OctopusDeploy/cost-intelligence-argocd/pkg/opencost"
@@ -1509,4 +1510,31 @@ func TestDailyRange_RejectsInvalidRanges(t *testing.T) {
 	assert.Equal(t, 7, days)
 	assert.Equal(t, "2026-09-27", from.Format(time.DateOnly))
 	assert.Equal(t, "2026-10-03", to.Format(time.DateOnly))
+}
+
+func TestHandleListNamespaces_NamesTheClustersOfTheirApplications(t *testing.T) {
+	t.Parallel()
+
+	store := &mockStorage{
+		listNamespacesFn: func(_ context.Context) ([]models.NamespaceSummary, error) {
+			return []models.NamespaceSummary{{Namespace: "shop", TotalCost: 5}, {Namespace: "orphan", TotalCost: 1}}, nil
+		},
+	}
+	srv := newTestAPIServer(t, store,
+		WithClusters([]ClusterChoice{{ID: "eks-hub", Local: true}, {ID: "eks-eu"}}),
+		WithApplications(stubApplications{apps: []exporter.Application{
+			{Ref: models.AppRef{Namespace: "argocd", Name: "shop"}, Destination: exporter.Destination{Namespace: "shop"}},
+		}}),
+	)
+
+	rr := doRequest(t, srv, http.MethodGet, "/api/cost-analysis/namespaces", nil)
+
+	require.Equal(t, http.StatusOK, rr.Code)
+	var body struct {
+		Namespaces []models.NamespaceSummary `json:"namespaces"`
+	}
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &body))
+	require.Len(t, body.Namespaces, 2)
+	assert.Equal(t, []string{"eks-hub"}, body.Namespaces[0].Clusters, "an app deploying here runs on this cluster")
+	assert.Empty(t, body.Namespaces[1].Clusters)
 }

@@ -170,12 +170,12 @@ func TestClusterScopedRoutes_FollowTheResolvedGateApplication(t *testing.T) {
 
 	rr := doRequestWithHeaders(t, srv, http.MethodGet, path, nil, asApp(testGateApp.String()))
 	assert.Equal(t, http.StatusForbidden, rr.Code, "no gate Application found yet")
-	assert.JSONEq(t, `{"clusterScopeApp":null}`, config("argocd:redis"))
+	assert.JSONEq(t, `{"clusterScopeApp":null,"measuredClusters":[],"clusters":[],"knownClusters":[]}`, config("argocd:redis"))
 
 	scope.set(&testGateApp)
 	rr = doRequestWithHeaders(t, srv, http.MethodGet, path, nil, asApp(testGateApp.String()))
 	assert.NotEqual(t, http.StatusForbidden, rr.Code, rr.Body.String())
-	assert.JSONEq(t, `{"clusterScopeApp":{"namespace":"argocd","name":"cost-intel"}}`, config("argocd:redis"))
+	assert.JSONEq(t, `{"clusterScopeApp":{"namespace":"argocd","name":"cost-intel"},"measuredClusters":[],"clusters":[],"knownClusters":[]}`, config("argocd:redis"))
 
 	renamed := models.AppRef{Namespace: "argocd", Name: "cost-intelligence"}
 	scope.set(&renamed)
@@ -211,7 +211,7 @@ func TestConfig_NullWithoutGateApplication(t *testing.T) {
 
 	rr := doRequestWithHeaders(t, srv, http.MethodGet, "/api/cost-analysis/config", nil, asApp("argocd:redis"))
 	require.Equal(t, http.StatusOK, rr.Code)
-	assert.JSONEq(t, `{"clusterScopeApp":null}`, rr.Body.String())
+	assert.JSONEq(t, `{"clusterScopeApp":null,"measuredClusters":[],"clusters":[],"knownClusters":[]}`, rr.Body.String())
 }
 
 // newFilterRecordingServer returns a server whose OpenCost records the filter of every allocation
@@ -417,4 +417,72 @@ func TestAppScoped_FailsClosedWithoutRequireApp(t *testing.T) {
 
 	assert.Equal(t, http.StatusForbidden, rr.Code)
 	assert.False(t, called)
+}
+
+func TestConfig_ListsTheClustersItMeasures(t *testing.T) {
+	t.Parallel()
+
+	srv := newTestAPIServer(t, redisStore(), WithMeasuredClusters([]MeasuredCluster{
+		{Name: "CICD"},
+		{Server: "https://eu.example.com", Name: "prod-eu"},
+	}))
+
+	rr := doRequestWithHeaders(t, srv, http.MethodGet, "/api/cost-analysis/config", nil, asApp("argocd:redis"))
+
+	require.Equal(t, http.StatusOK, rr.Code)
+	var body struct {
+		MeasuredClusters []MeasuredCluster `json:"measuredClusters"`
+	}
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &body))
+	assert.Equal(t, []MeasuredCluster{{Name: "CICD"}, {Server: "https://eu.example.com", Name: "prod-eu"}}, body.MeasuredClusters)
+}
+
+func TestClusterScopedRoutes_ReadOnlyTheClustersTheyList(t *testing.T) {
+	t.Parallel()
+
+	srv := newTestAPIServer(t, redisStore(), WithClusters([]ClusterChoice{{ID: "eks-hub", Local: true}, {ID: "eks-eu"}}))
+	gate := asApp(testGateApp.String())
+	path := "/api/cost-analysis/cluster/overhead"
+
+	rr := doRequestWithHeaders(t, srv, http.MethodGet, path+"?cluster=eks-other", nil, gate)
+	assert.Equal(t, http.StatusBadRequest, rr.Code, "a cluster nobody listed is not read")
+
+	for _, query := range []string{"", "?cluster=eks-eu", "?cluster=eks-hub"} {
+		rr = doRequestWithHeaders(t, srv, http.MethodGet, path+query, nil, gate)
+		assert.NotEqual(t, http.StatusBadRequest, rr.Code, query)
+	}
+}
+
+func TestClusterScopedRoutes_WithoutAClusterListTheParameterIsIgnored(t *testing.T) {
+	t.Parallel()
+
+	srv := newTestAPIServer(t, redisStore())
+
+	rr := doRequestWithHeaders(t, srv, http.MethodGet, "/api/cost-analysis/cluster/overhead?cluster=anything", nil, asApp(testGateApp.String()))
+
+	assert.NotEqual(t, http.StatusBadRequest, rr.Code)
+}
+
+func TestConfig_OffersTheClustersTheBackendReports(t *testing.T) {
+	t.Parallel()
+
+	srv := newTestAPIServer(t, redisStore(),
+		WithClusters([]ClusterChoice{{ID: "eks-hub", Local: true}}),
+		WithDiscoveredClusters(func() []string { return []string{"eks-eu", "eks-hub"} }))
+
+	rr := doRequestWithHeaders(t, srv, http.MethodGet, "/api/cost-analysis/config", nil, asApp("argocd:redis"))
+
+	require.Equal(t, http.StatusOK, rr.Code)
+	var body struct {
+		Clusters         []ClusterChoice   `json:"clusters"`
+		KnownClusters    []string          `json:"knownClusters"`
+		MeasuredClusters []MeasuredCluster `json:"measuredClusters"`
+	}
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &body))
+	assert.Equal(t, []ClusterChoice{{ID: "eks-hub", Local: true}, {ID: "eks-eu"}}, body.Clusters, "this one first, once")
+	assert.Equal(t, []string{"eks-eu", "eks-hub"}, body.KnownClusters)
+	assert.Contains(t, body.MeasuredClusters, MeasuredCluster{Name: "eks-eu"}, "an Argo CD cluster named like it is measured")
+
+	rr = doRequestWithHeaders(t, srv, http.MethodGet, "/api/cost-analysis/cluster/overhead?cluster=eks-eu", nil, asApp(testGateApp.String()))
+	assert.NotEqual(t, http.StatusBadRequest, rr.Code, "a discovered cluster can be read")
 }

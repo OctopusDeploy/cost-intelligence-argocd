@@ -385,6 +385,39 @@ func TestParsePodBreakdown_Empty(t *testing.T) {
 	assert.Empty(t, got)
 }
 
+func TestPodAllocations_PodsCarryTheirGroup(t *testing.T) {
+	t.Parallel()
+
+	pod := func(name string, labels map[string]string) AllocationData {
+		return AllocationData{
+			CPUCost: 1, TotalCost: 1,
+			Properties: AllocationProperties{Pod: name, Namespace: "ci", Labels: labels},
+		}
+	}
+	resp := AllocationResponse{Data: []map[string]AllocationData{{
+		"job":       pod("job", map[string]string{"team": "design", "project_runner_gitlab_com_name": "git-cleaner"}),
+		"team-only": pod("team-only", map[string]string{"team": "infra"}),
+		"plain":     pod("plain", nil),
+	}}}
+	groupLabels := []string{"team", sanitizeLabelKey("project.runner.gitlab.com/name")}
+
+	got := map[string]string{}
+	for _, p := range (&PodAllocations{resp: resp, groupLabels: groupLabels}).Pods() {
+		got[p.Name] = p.Group
+	}
+	assert.Equal(t, map[string]string{"job": "design / git-cleaner", "team-only": "infra", "plain": ""}, got)
+
+	for _, p := range (&PodAllocations{resp: resp}).Pods() {
+		assert.Empty(t, p.Group, "grouping is off without labels")
+	}
+}
+
+func TestSanitizeLabelKey(t *testing.T) {
+	t.Parallel()
+	assert.Equal(t, "project_runner_gitlab_com_name", sanitizeLabelKey("project.runner.gitlab.com/name"))
+	assert.Equal(t, "team", sanitizeLabelKey("team"))
+}
+
 func TestParsePodBreakdown_ExtractsPropertiesAndAppliesMultiplier(t *testing.T) {
 	t.Parallel()
 

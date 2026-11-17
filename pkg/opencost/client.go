@@ -13,6 +13,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/OctopusDeploy/cost-intelligence-argocd/pkg/models"
@@ -22,6 +23,23 @@ type Client struct {
 	baseURL string
 	client  *http.Client
 	logger  *log.Logger
+
+	// kubecost adapts requests to Kubecost's allocation and assets APIs; see WithKubecost.
+	kubecost bool
+	// clusterID restricts every query to one cluster, as a Kubecost aggregator answers for all of them.
+	clusterID string
+	// header is sent with every request, for a backend behind an API key. Its value is a secret.
+	headerName, headerValue string
+	// groupLabels are the pod labels, sanitized as OpenCost reports them, whose values name a pod's group.
+	groupLabels []string
+	// shareTenancy and shareNamespaces ask Kubecost to spread cluster-level (tenancy) costs and the
+	// cost of the named namespaces over the other allocations; see WithSharedCosts.
+	shareTenancy    bool
+	shareNamespaces []string
+
+	// volumeMu guards volumeCache: the claims of a cluster's volumes, by cluster, read once for a while.
+	volumeMu    sync.Mutex
+	volumeCache map[string]volumeClaims
 }
 
 // ClientOption configures a Client.
@@ -30,6 +48,76 @@ type ClientOption func(*Client)
 // WithTransport sends the client's requests through transport, for example to instrument them.
 func WithTransport(transport http.RoundTripper) ClientOption {
 	return func(c *Client) { c.client.Transport = transport }
+}
+
+// WithKubecost makes the client query a Kubecost API instead of OpenCost's: base URL ending in /model,
+// one accumulated set per window, no idle allocation, and only the cluster clusterID. Kubecost with an
+// aggregator answers for every cluster it knows, so clusterID is required to keep a namespace that
+// exists in several clusters from being summed across them.
+func WithKubecost(clusterID string) ClientOption {
+	return func(c *Client) {
+		c.kubecost = true
+		c.clusterID = clusterID
+	}
+}
+
+// WithSharedCosts has a Kubecost query spread costs no application owns over the allocations it
+// returns, in proportion to their cost, and counts that share in the totals: tenancy costs (the
+// cluster-level costs Kubecost reports as "Tenancy Costs") when tenancy is true, and the cost of each
+// namespace in namespaces (for example kube-system). Kubecost spreads the tenancy costs; the
+// namespaces are spread here, within the cluster being read, because Kubecost would pool them across
+// every cluster. Without it nothing is shared and a namespace costs only what its own pods, volumes
+// and network cost. A shared namespace is not measured itself.
+func WithSharedCosts(tenancy bool, namespaces []string) ClientOption {
+	return func(c *Client) {
+		c.shareTenancy = tenancy
+		for _, namespace := range namespaces {
+			if namespace = strings.TrimSpace(namespace); namespace != "" {
+				c.shareNamespaces = append(c.shareNamespaces, namespace)
+			}
+		}
+	}
+}
+
+// WithPodGroupLabels names the pod labels (as Kubernetes spells them, for example
+// project.runner.gitlab.com/name) whose values form PodCost.Group: the values present, joined by " / ".
+// A pod with none has no group.
+func WithPodGroupLabels(labels []string) ClientOption {
+	return func(c *Client) {
+		for _, label := range labels {
+			if label = strings.TrimSpace(label); label != "" {
+				c.groupLabels = append(c.groupLabels, sanitizeLabelKey(label))
+			}
+		}
+	}
+}
+
+// sanitizeLabelKey spells a label key as OpenCost reports it: every character that is not a letter,
+// a digit or an underscore becomes an underscore.
+func sanitizeLabelKey(key string) string {
+	return strings.Map(func(r rune) rune {
+		if r == '_' || r >= '0' && r <= '9' || r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' {
+			return r
+		}
+		return '_'
+	}, key)
+}
+
+// WithHeader sends name: value with every request, for example an API key. It is never logged.
+func WithHeader(name, value string) ClientOption {
+	return func(c *Client) { c.headerName, c.headerValue = name, value }
+}
+
+// headerTransport adds a header to each request it forwards, on a copy, as RoundTrippers must.
+type headerTransport struct {
+	next        http.RoundTripper
+	name, value string
+}
+
+func (t headerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	clone := req.Clone(req.Context())
+	clone.Header.Set(t.name, t.value)
+	return t.next.RoundTrip(clone)
 }
 
 func NewClient(baseURL string, timeout time.Duration, logger *log.Logger, opts ...ClientOption) *Client {
@@ -46,6 +134,13 @@ func NewClient(baseURL string, timeout time.Duration, logger *log.Logger, opts .
 	}
 	for _, opt := range opts {
 		opt(c)
+	}
+	if c.headerName != "" && c.headerValue != "" {
+		next := c.client.Transport
+		if next == nil {
+			next = http.DefaultTransport
+		}
+		c.client.Transport = headerTransport{next: next, name: c.headerName, value: c.headerValue}
 	}
 	return c
 }
@@ -112,8 +207,20 @@ type AllocationData struct {
 	SharedCostBreakdown          map[string]SharedCostItem `json:"sharedCostBreakdown,omitempty"`
 	ExternalCost                 float64                   `json:"externalCost"`
 	CarbonCost                   float64                   `json:"carbonCost"`
+	// PVs are the volumes of an allocation by key, read for the unmounted volumes entry only and
+	// cleared once read (unmountedVolumeCosts): a namespace can have hundreds, which are not stored.
+	PVs        map[string]PVAllocation `json:"pvs,omitempty"`
 	Properties                   AllocationProperties      `json:"properties"`
 	RawAllocationOnly            *RawAllocationOnly        `json:"rawAllocationOnly,omitempty"`
+
+	// countShared adds SharedCost to what the allocation costs. Set when the request asked for costs to
+	// be shared (see Client.countShared); otherwise SharedCost is only reported, as before.
+	countShared bool
+}
+
+// PVAllocation is the cost of one volume within an allocation.
+type PVAllocation struct {
+	Cost float64 `json:"cost"`
 }
 
 // componentCost is what an allocation costs in the resources this service reports: CPU, GPU, memory,
@@ -122,7 +229,176 @@ type AllocationData struct {
 // projected onto a month it drifts from the sum of the parts shown beside it, and it carries shared
 // and external costs that no view shows.
 func (a AllocationData) componentCost() float64 {
+	return a.baseCost() + a.countedShared()
+}
+
+// baseCost is componentCost without any shared cost.
+func (a AllocationData) baseCost() float64 {
 	return a.CPUCost + a.GPUCost + a.RAMCost + a.PVCost + a.NetworkCost + a.LoadBalancerCost
+}
+
+// countedShared is the share of tenancy and shared-namespace costs this allocation carries, when the
+// request asked for it.
+func (a AllocationData) countedShared() float64 {
+	if !a.countShared {
+		return 0
+	}
+	return a.SharedCost
+}
+
+// applySharing asks Kubecost to share its tenancy costs, on a request whose answer is priced (not a
+// summary). Shared namespaces are not asked of Kubecost: it pools them across every cluster it knows
+// (see shareNamespacesInCluster).
+func (c *Client) applySharing(params url.Values) {
+	if c.kubecost && c.shareTenancy {
+		params.Set("shareTenancyCosts", "true")
+	}
+}
+
+// countShared marks the allocations of a response so the tenancy cost Kubecost shared counts in the
+// totals, when this client asked for it.
+func (c *Client) countShared(resp *AllocationResponse) {
+	if !c.kubecost || !c.shareTenancy {
+		return
+	}
+	for _, set := range resp.Data {
+		for key, alloc := range set {
+			alloc.countShared = true
+			set[key] = alloc
+		}
+	}
+}
+
+// shareNamespacesInCluster spreads the cost of the shared namespaces over the allocations of resp, in
+// proportion to their cost, within the cluster being read. Kubecost's own shareNamespaces would pool
+// the namespace of every cluster and spread it over all of them, so a cluster would pay for the
+// kube-system of the others. The pool is read for the same window, one set per day when daily. If it
+// cannot be read the response is left unshared, and a measured namespace that is itself shared
+// receives nothing.
+func (c *Client) shareNamespacesInCluster(ctx context.Context, resp *AllocationResponse, namespace, window string, daily bool) {
+	if !c.kubecost || len(c.shareNamespaces) == 0 || slices.Contains(c.shareNamespaces, namespace) {
+		return
+	}
+	params := url.Values{}
+	params.Add("window", window)
+	params.Add("aggregate", "namespace")
+	c.prepare(ctx, params, daily)
+	requestURL := fmt.Sprintf("%s/allocation?%s", c.baseURL, params.Encode())
+	c.logf("DEBUG opencost GET %s", requestURL)
+
+	pool, err := c.readAllocations(ctx, requestURL)
+	if err != nil {
+		c.logf("WARN opencost: reading the cluster's costs to share namespaces: %v", err)
+		return
+	}
+	if len(pool.Data) != len(resp.Data) {
+		c.logf("WARN opencost: shared namespaces not applied: %d sets for the pool, %d for the query", len(pool.Data), len(resp.Data))
+		return
+	}
+	for i, set := range resp.Data {
+		sharedBy := map[string]float64{}
+		var shared, others float64
+		for key, alloc := range pool.Data[i] {
+			switch {
+			case isVirtualAllocation(key):
+			case slices.Contains(c.shareNamespaces, key):
+				shared += alloc.baseCost()
+				sharedBy[key] += alloc.baseCost()
+			default:
+				others += alloc.baseCost()
+			}
+		}
+		if shared <= 0 || others <= 0 {
+			continue
+		}
+		for key, alloc := range set {
+			if isVirtualAllocation(key) {
+				continue
+			}
+			fraction := alloc.baseCost() / others
+			alloc.SharedCost += shared * fraction
+			breakdown := make(map[string]SharedCostItem, len(alloc.SharedCostBreakdown)+len(sharedBy))
+			maps.Copy(breakdown, alloc.SharedCostBreakdown)
+			for ns, cost := range sharedBy {
+				name := "Namespace " + ns
+				breakdown[name] = SharedCostItem{TotalCost: breakdown[name].TotalCost + cost*fraction}
+			}
+			alloc.SharedCostBreakdown = breakdown
+			alloc.countShared = true
+			set[key] = alloc
+		}
+	}
+}
+
+func (c *Client) readAllocations(ctx context.Context, requestURL string) (*AllocationResponse, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, requestURL, http.NoBody)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("opencost request failed: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("opencost returned status %d: %s", resp.StatusCode, string(body))
+	}
+	var result AllocationResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("failed to decode opencost response: %w", err)
+	}
+	return &result, nil
+}
+
+// prepare adapts the parameters of an allocation request to the provider. OpenCost's are left as
+// they are. Kubecost differs in defaults that change the numbers without failing the request:
+// idle is included (OpenCost: not), and a window comes back as one set per day unless accumulated.
+// It documents neither includeRawAllocation nor step on this endpoint, so they are not sent. daily
+// keeps the per-day sets, which the daily history reads one by one.
+func (c *Client) prepare(ctx context.Context, params url.Values, daily bool) {
+	if !c.kubecost {
+		return
+	}
+	params.Set("includeIdle", "false")
+	if !daily {
+		params.Set("accumulate", "true")
+	}
+	params.Del("includeRawAllocation")
+	params.Del("step")
+	c.scopeToCluster(ctx, params)
+}
+
+type clusterKey struct{}
+
+// WithCluster has the queries made with the returned context read one cluster of a Kubecost aggregator,
+// instead of the client's own. An empty id leaves ctx as it is.
+func WithCluster(ctx context.Context, id string) context.Context {
+	if id == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, clusterKey{}, id)
+}
+
+// clusterOf is the cluster a Kubecost query reads: the one ctx names, else the client's own.
+func (c *Client) clusterOf(ctx context.Context) string {
+	if id, ok := ctx.Value(clusterKey{}).(string); ok {
+		return id
+	}
+	return c.clusterID
+}
+
+// scopeToCluster adds the cluster to the filter, joined to any filter already there with "+", Kubecost's AND.
+func (c *Client) scopeToCluster(ctx context.Context, params url.Values) {
+	clusterID := c.clusterOf(ctx)
+	if clusterID == "" {
+		return
+	}
+	filter := fmt.Sprintf("cluster:%q", clusterID)
+	if existing := params.Get("filter"); existing != "" {
+		filter += "+" + existing
+	}
+	params.Set("filter", filter)
 }
 
 func (c *Client) logf(format string, args ...any) {
@@ -214,6 +490,8 @@ func (c *Client) GetNamespaceCost(ctx context.Context, namespace string) (*model
 	params.Add("filter", fmt.Sprintf("namespace:%q", namespace))
 	params.Add("includeRawAllocation", "true")
 
+	c.prepare(ctx, params, false)
+	c.applySharing(params)
 	requestURL := fmt.Sprintf("%s/allocation?%s", c.baseURL, params.Encode())
 	c.logf("DEBUG opencost GET %s", requestURL)
 
@@ -239,6 +517,8 @@ func (c *Client) GetNamespaceCost(ctx context.Context, namespace string) (*model
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return nil, fmt.Errorf("failed to decode opencost response: %w", err)
 	}
+	c.countShared(&result)
+	c.shareNamespacesInCluster(ctx, &result, namespace, params.Get("window"), false)
 
 	metrics := parseOpenCostResponse(result, startTime, endTime)
 	return metrics, nil
@@ -279,6 +559,7 @@ func (c *Client) GetNamespaceSummary(ctx context.Context, namespace string) (*mo
 	params.Add("aggregate", "namespace")
 	params.Add("filter", fmt.Sprintf("namespace:%q", namespace))
 
+	c.prepare(ctx, params, false)
 	requestURL := fmt.Sprintf("%s/allocation/summary?%s", c.baseURL, params.Encode())
 	c.logf("DEBUG opencost GET %s", requestURL)
 
@@ -318,6 +599,26 @@ func (c *Client) GetNamespaceSummary(ctx context.Context, namespace string) (*mo
 type PodAllocations struct {
 	resp       AllocationResponse
 	start, end time.Time
+	// volumeCosts is what each unmounted volume cost, by PV name; claimOf names the claim of a PV. An
+	// application that lists a claim owns that volume's cost (see owned). Both are empty when the
+	// namespace has no unmounted volume or the claims could not be read.
+	volumeCosts map[string]float64
+	claimOf     map[string]claimRef
+	// namespace is the one queried: the namespace of a pod whose allocation carries none (Kubecost
+	// keeps only the properties every entry shares), for a resource that names its own.
+	namespace string
+	// groupLabels are the client's, see WithPodGroupLabels.
+	groupLabels []string
+	// soleApplication is set when exactly one application deploys to the namespace: every volume no pod
+	// mounts is then its, listed in its resources or not. With several, only the claims an application
+	// lists are its; the rest stay in the namespace's cost.
+	soleApplication bool
+}
+
+// SoleApplication tells the measurement whether one application is the only one deploying to the
+// namespace, so that it owns the volumes no pod mounts. Call it before measuring an application.
+func (p *PodAllocations) SoleApplication(sole bool) {
+	p.soleApplication = sole
 }
 
 func (c *Client) GetPodAllocations(ctx context.Context, namespace string) (*PodAllocations, error) {
@@ -340,6 +641,8 @@ func (c *Client) podAllocations(ctx context.Context, namespace string, startTime
 	// Peak usage per pod, for an application's efficiency.
 	params.Add("includeRawAllocation", "true")
 
+	c.prepare(ctx, params, false)
+	c.applySharing(params)
 	requestURL := fmt.Sprintf("%s/allocation?%s", c.baseURL, params.Encode())
 	c.logf("DEBUG opencost GET %s", requestURL)
 
@@ -365,8 +668,58 @@ func (c *Client) podAllocations(ctx context.Context, namespace string, startTime
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return nil, fmt.Errorf("failed to decode opencost response: %w", err)
 	}
+	c.countShared(&result)
+	c.shareNamespacesInCluster(ctx, &result, namespace, params.Get("window"), false)
 
-	return &PodAllocations{resp: result, start: startTime, end: endTime}, nil
+	pods := &PodAllocations{resp: result, start: startTime, end: endTime, namespace: namespace, groupLabels: c.groupLabels}
+	pods.volumeCosts = unmountedVolumeCosts(result, namespace)
+	if len(pods.volumeCosts) > 0 {
+		claims, err := c.volumeClaims(ctx)
+		if err != nil {
+			// The volumes stay in the namespace's cost, unattributed to any application.
+			c.logf("WARN opencost: reading volume claims: %v", err)
+		}
+		pods.claimOf = claims.byVolume
+	}
+	return pods, nil
+}
+
+// isUnmountedEntry is isUnmountedVolumes for an entry that may carry no namespace, as Kubecost's pod
+// allocations keep only the properties every entry shares: the pod's name then says whose it is.
+func isUnmountedEntry(alloc AllocationData, namespace string) bool {
+	if isUnmountedVolumes(alloc) {
+		return true
+	}
+	return namespace != "" && alloc.Properties.Namespace == "" && alloc.Properties.Pod == namespace+"-unmounted-pvcs"
+}
+
+// unmountedVolumeCosts reads what each volume of the unmounted volumes entry cost, by PV name, and
+// clears every allocation's volume list.
+func unmountedVolumeCosts(resp AllocationResponse, namespace string) map[string]float64 {
+	costs := map[string]float64{}
+	for _, allocations := range resp.Data {
+		for key, alloc := range allocations {
+			if len(alloc.PVs) == 0 {
+				continue
+			}
+			if isUnmountedEntry(alloc, namespace) {
+				for pv, v := range alloc.PVs {
+					costs[pvName(pv)] += v.Cost
+				}
+			}
+			alloc.PVs = nil
+			allocations[key] = alloc
+		}
+	}
+	return costs
+}
+
+// pvName is the PV name in a volume key, which Kubecost and OpenCost spell cluster=<c>:name=<pv>.
+func pvName(key string) string {
+	if i := strings.LastIndex(key, "name="); i >= 0 {
+		return key[i+len("name="):]
+	}
+	return key
 }
 
 // GetContainerAllocations returns every container of every pod in a namespace over the last 24
@@ -379,6 +732,7 @@ func (c *Client) GetContainerAllocations(ctx context.Context, namespace string) 
 	params.Add("aggregate", "pod,container")
 	params.Add("filter", fmt.Sprintf("namespace:%q", namespace))
 
+	c.prepare(ctx, params, false)
 	requestURL := fmt.Sprintf("%s/allocation?%s", c.baseURL, params.Encode())
 	c.logf("DEBUG opencost GET %s", requestURL)
 
@@ -442,9 +796,44 @@ func parseContainerAllocations(resp AllocationResponse) []models.ContainerAlloca
 	return containers
 }
 
-// Pods returns every pod in the namespace with its monthly cost.
+// Pods returns every pod in the namespace with its monthly cost, and its group when grouping labels
+// are configured.
 func (p *PodAllocations) Pods() []models.PodCost {
-	return parsePodBreakdown(p.resp)
+	pods := parsePodBreakdown(p.resp)
+	if len(p.groupLabels) == 0 {
+		return pods
+	}
+	groups := podGroups(p.resp, p.groupLabels)
+	for i := range pods {
+		pods[i].Group = groups[pods[i].Name]
+	}
+	return pods
+}
+
+// podGroups maps each pod to the values of labels it carries, joined by " / ". A pod with none is absent.
+func podGroups(resp AllocationResponse, labels []string) map[string]string {
+	groups := make(map[string]string)
+	for _, allocations := range resp.Data {
+		for key, alloc := range allocations {
+			name := key
+			if alloc.Properties.Pod != "" {
+				name = alloc.Properties.Pod
+			}
+			if groups[name] != "" {
+				continue
+			}
+			var values []string
+			for _, label := range labels {
+				if value := alloc.Properties.Labels[label]; value != "" {
+					values = append(values, value)
+				}
+			}
+			if len(values) > 0 {
+				groups[name] = strings.Join(values, " / ")
+			}
+		}
+	}
+	return groups
 }
 
 // Efficiency measures every pod in the namespace as podEfficiency measures an application's: its
@@ -475,7 +864,7 @@ func (p *PodAllocations) Namespace() *models.OpenCostMetrics {
 // pods ran rather than the namespace's, so a new application in an older namespace is not
 // under-reported.
 func (p *PodAllocations) ForApplication(resources models.ManagedResources) *models.AppMeasurement {
-	owned := ownedAllocations(p.resp, resources)
+	owned := p.owned(resources)
 	metrics := parseOpenCostResponse(owned, p.start, p.end)
 	// The raw allocations are already stored once, with the namespace's measurement.
 	metrics.ResourceDetails = nil
@@ -485,8 +874,39 @@ func (p *PodAllocations) ForApplication(resources models.ManagedResources) *mode
 		TotalMonthlyCost: metrics.AllocationTotals.TotalCost,
 		OpenCostOutput:   *metrics,
 		Efficiency:       podEfficiency(owned),
-		Pods:             parsePodBreakdown(owned),
+		Pods:             p.grouped(p.named(parsePodBreakdown(owned), resources), owned),
 	}
+}
+
+// grouped sets the group (team, project) of the pods that carry the grouping labels, as Pods does for
+// the namespace's, so an application's CI job pods read per team and project instead of one by one.
+func (p *PodAllocations) grouped(pods []models.PodCost, resp AllocationResponse) []models.PodCost {
+	if len(p.groupLabels) == 0 {
+		return pods
+	}
+	groups := podGroups(resp, p.groupLabels)
+	for i := range pods {
+		pods[i].Group = groups[pods[i].Name]
+	}
+	return pods
+}
+
+// named gives a pod the provider reported without a controller the one that owns it, so the pods group
+// under their controllers as OpenCost's do.
+func (p *PodAllocations) named(pods []models.PodCost, resources models.ManagedResources) []models.PodCost {
+	for i, pod := range pods {
+		if pod.Controller != "" {
+			continue
+		}
+		ns := pod.Namespace
+		if ns == "" {
+			ns = p.namespace
+		}
+		if owner, ok := resources.OwnerOf(ns, "", "", pod.Name); ok && !strings.EqualFold(owner.Kind, "pod") {
+			pods[i].Controller, pods[i].ControllerKind = owner.Name, owner.Kind
+		}
+	}
+	return pods
 }
 
 // HourlyCost is the cost per hour of a set of pods, by resource. The resources add up to the pods'
@@ -509,7 +929,7 @@ func (p *PodAllocations) HourlyCostOf(resources models.ManagedResources) HourlyC
 	if hours <= 0 {
 		return cost
 	}
-	for _, allocations := range ownedAllocations(p.resp, resources).Data {
+	for _, allocations := range p.owned(resources).Data {
 		for _, a := range allocations {
 			cost.CPU += a.CPUCost
 			cost.Memory += a.RAMCost
@@ -527,8 +947,59 @@ func (p *PodAllocations) HourlyCostOf(resources models.ManagedResources) HourlyC
 	return cost
 }
 
+// owned is ownedAllocations, plus the volumes the application's PersistentVolumeClaims name that no pod
+// mounts. OpenCost lists those, for the whole namespace, as one more pod; here the entry holds only the
+// cost of the volumes the application lists, so each claim's cost is counted once, under the application
+// that deploys it. A claim is matched by its name and, when the provider reports it, its namespace, and
+// only when no other claim in the cluster has that name: a name that repeats could be any of them.
+func (p *PodAllocations) owned(resources models.ManagedResources) AllocationResponse {
+	owned := ownedAllocations(p.resp, p.namespace, resources.PodOwners())
+	claims := resources.Claims(p.namespace)
+	var cost float64
+	if !p.soleApplication {
+		if len(claims) == 0 || len(p.volumeCosts) == 0 {
+			return owned
+		}
+		for pv, c := range p.volumeCosts {
+			if ref, ok := p.claimOf[pv]; ok && claims[ref.name] && (ref.namespace == "" || ref.namespace == p.namespace) {
+				cost += c
+			}
+		}
+		if cost <= 0 {
+			return owned
+		}
+	}
+	for i, allocations := range p.resp.Data {
+		for _, alloc := range allocations {
+			if !isUnmountedEntry(alloc, p.namespace) {
+				continue
+			}
+			// Capped at the entry: rounding must not put the application above its namespace. The
+			// namespace's only application owns the whole entry.
+			if p.soleApplication {
+				cost = alloc.PVCost
+			} else {
+				cost = math.Min(cost, alloc.PVCost)
+			}
+			if cost <= 0 {
+				return owned
+			}
+			owned.Data[i][p.namespace+"-unmounted-pvcs"] = AllocationData{
+				Start:      alloc.Start,
+				End:        alloc.End,
+				Minutes:    alloc.Minutes,
+				PVCost:     cost,
+				TotalCost:  cost,
+				Properties: AllocationProperties{Cluster: alloc.Properties.Cluster, Namespace: p.namespace, Pod: p.namespace + "-unmounted-pvcs"},
+			}
+			return owned
+		}
+	}
+	return owned
+}
+
 // ownedAllocations keeps the pod allocations the resources own, dropping OpenCost's virtual entries.
-func ownedAllocations(resp AllocationResponse, resources models.ManagedResources) AllocationResponse {
+func ownedAllocations(resp AllocationResponse, namespace string, resources models.ManagedResources) AllocationResponse {
 	owned := AllocationResponse{Code: resp.Code, Data: make([]map[string]AllocationData, 0, len(resp.Data))}
 	for _, allocations := range resp.Data {
 		kept := make(map[string]AllocationData)
@@ -540,7 +1011,11 @@ func ownedAllocations(resp AllocationResponse, resources models.ManagedResources
 			if pod == "" {
 				pod = key
 			}
-			if resources.OwnsPod(alloc.Properties.Namespace, alloc.Properties.ControllerKind, alloc.Properties.Controller, pod) {
+			ns := alloc.Properties.Namespace
+			if ns == "" {
+				ns = namespace
+			}
+			if resources.OwnsPodLabeled(ns, alloc.Properties.ControllerKind, alloc.Properties.Controller, pod, alloc.Properties.Labels) {
 				kept[key] = alloc
 			}
 		}
@@ -643,6 +1118,7 @@ func (c *Client) GetOrphanedPods(ctx context.Context, namespace string) ([]model
 	params.Add("aggregate", "pod")
 	params.Add("filter", fmt.Sprintf("namespace:%q", namespace))
 
+	c.prepare(ctx, params, false)
 	requestURL := fmt.Sprintf("%s/allocation?%s", c.baseURL, params.Encode())
 	c.logf("DEBUG opencost GET %s", requestURL)
 
@@ -680,6 +1156,7 @@ func (c *Client) GetChargeback(ctx context.Context, labelKey, namespace string) 
 		params.Add("filter", fmt.Sprintf("namespace:%q", namespace))
 	}
 
+	c.prepare(ctx, params, false)
 	allocURL := fmt.Sprintf("%s/allocation?%s", c.baseURL, params.Encode())
 	c.logf("DEBUG opencost chargeback alloc GET %s", allocURL)
 
@@ -704,6 +1181,7 @@ func (c *Client) GetChargeback(ctx context.Context, labelKey, namespace string) 
 		return nil, fmt.Errorf("failed to decode allocation response: %w", err)
 	}
 
+	c.prepare(ctx, params, false)
 	summaryURL := fmt.Sprintf("%s/allocation/summary?%s", c.baseURL, params.Encode())
 	c.logf("DEBUG opencost chargeback summary GET %s", summaryURL)
 
@@ -845,6 +1323,7 @@ func (c *Client) GetLabelKeys(ctx context.Context, namespace string) ([]string, 
 		params.Add("filter", fmt.Sprintf("namespace:%q", namespace))
 	}
 
+	c.prepare(ctx, params, false)
 	requestURL := fmt.Sprintf("%s/allocation/autocomplete?%s", c.baseURL, params.Encode())
 	c.logf("DEBUG opencost label keys GET %s", requestURL)
 
@@ -970,6 +1449,7 @@ func parseOrphanedPods(resp AllocationResponse) []models.OrphanedPod {
 				RAMCost:        alloc.RAMCost * monthlyMultiplier,
 				StorageCost:    alloc.PVCost * monthlyMultiplier,
 				TotalCost:      alloc.componentCost() * monthlyMultiplier,
+				Labels:         alloc.Properties.Labels,
 			})
 		}
 	}
@@ -1017,6 +1497,8 @@ func (c *Client) GetDailyTimeSeries(
 	params.Add("aggregate", aggregate)
 	params.Add("filter", fmt.Sprintf("namespace:%q", namespace))
 
+	c.prepare(ctx, params, true)
+	c.applySharing(params)
 	requestURL := fmt.Sprintf("%s/allocation?%s", c.baseURL, params.Encode())
 	c.logf("DEBUG opencost GET %s", requestURL)
 
@@ -1042,6 +1524,8 @@ func (c *Client) GetDailyTimeSeries(
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return nil, fmt.Errorf("failed to decode opencost daily response: %w", err)
 	}
+	c.countShared(&result)
+	c.shareNamespacesInCluster(ctx, &result, namespace, params.Get("window"), true)
 
 	if resources != nil {
 		result = ownedControllers(result, namespace, resources)
@@ -1114,6 +1598,9 @@ func parsePodBreakdown(resp AllocationResponse) []models.PodCost {
 
 	for _, allocations := range resp.Data {
 		for podKey, alloc := range allocations {
+			if isVirtualAllocation(podKey) {
+				continue
+			}
 			name := podKey
 			if alloc.Properties.Pod != "" {
 				name = alloc.Properties.Pod
@@ -1122,6 +1609,7 @@ func parsePodBreakdown(resp AllocationResponse) []models.PodCost {
 			if existing, ok := podMap[name]; ok {
 				existing.CPUCost += alloc.CPUCost
 				existing.RAMCost += alloc.RAMCost
+				existing.SharedCost += alloc.countedShared()
 				existing.TotalCost += alloc.componentCost()
 			} else {
 				podMap[name] = &models.PodCost{
@@ -1131,20 +1619,18 @@ func parsePodBreakdown(resp AllocationResponse) []models.PodCost {
 					ControllerKind: alloc.Properties.ControllerKind,
 					CPUCost:        alloc.CPUCost,
 					RAMCost:        alloc.RAMCost,
+					SharedCost:     alloc.countedShared(),
 					TotalCost:      alloc.componentCost(),
 				}
 			}
 		}
 	}
 
-	const minCostThreshold = 0.001 // skip terminated/zero-cost pods
+	// Every pod OpenCost reports is listed, however little it cost: a short job costs cents, and
+	// leaving it out hides a pod the application launched.
 	monthlyMultiplier := monthlyFactor(measuredPeriod(resp))
 	pods := make([]models.PodCost, 0, len(podMap))
 	for _, p := range podMap {
-		monthlyCost := p.TotalCost * monthlyMultiplier
-		if monthlyCost < minCostThreshold {
-			continue
-		}
 		pods = append(pods, models.PodCost{
 			Name:           p.Name,
 			Namespace:      p.Namespace,
@@ -1152,7 +1638,8 @@ func parsePodBreakdown(resp AllocationResponse) []models.PodCost {
 			ControllerKind: p.ControllerKind,
 			CPUCost:        p.CPUCost * monthlyMultiplier,
 			RAMCost:        p.RAMCost * monthlyMultiplier,
-			TotalCost:      monthlyCost,
+			SharedCost:     p.SharedCost * monthlyMultiplier,
+			TotalCost:      p.TotalCost * monthlyMultiplier,
 		})
 	}
 	return pods
@@ -1212,7 +1699,7 @@ func parseOpenCostResponse(resp AllocationResponse, startTime, endTime time.Time
 	}
 
 	var totalCPU, totalMem, totalStorage, totalGPU, totalNetwork, totalLB, totalCarbon, totalShared float64
-	var totalNetXZ, totalNetXR, totalNetInternet, totalNetNat float64
+	var totalNetXZ, totalNetXR, totalNetInternet, totalNetNat, totalSharedCounted float64
 	var peakCPU, peakRAM float64
 	sharedBreakdown := make(map[string]float64)
 
@@ -1225,7 +1712,12 @@ func parseOpenCostResponse(resp AllocationResponse, startTime, endTime time.Time
 			break
 		}
 		metrics.ResourceDetails[key] = allocations
-		for _, alloc := range allocations {
+		for allocKey, alloc := range allocations {
+			// Idle capacity is not the namespace's cost, and Kubecost lists __idle__ even
+			// when includeIdle is false.
+			if isVirtualAllocation(allocKey) {
+				continue
+			}
 			totalCPU += alloc.CPUCost
 			totalMem += alloc.RAMCost
 			totalStorage += alloc.PVCost
@@ -1234,6 +1726,7 @@ func parseOpenCostResponse(resp AllocationResponse, startTime, endTime time.Time
 			totalLB += alloc.LoadBalancerCost
 			totalCarbon += alloc.CarbonCost
 			totalShared += alloc.SharedCost
+			totalSharedCounted += alloc.countedShared()
 			totalNetXZ += alloc.NetworkCrossZoneCost
 			totalNetXR += alloc.NetworkCrossRegionCost
 			totalNetInternet += alloc.NetworkInternetCost
@@ -1274,9 +1767,10 @@ func parseOpenCostResponse(resp AllocationResponse, startTime, endTime time.Time
 		NetworkInternetCost:    totalNetInternet * monthlyMultiplier,
 		NetworkNatGatewayCost:  totalNetNat * monthlyMultiplier,
 		LoadBalancerCost:       totalLB * monthlyMultiplier,
-		TotalCost:              (totalCPU + totalMem + totalStorage + totalGPU + totalNetwork + totalLB) * monthlyMultiplier,
+		TotalCost:              (totalCPU + totalMem + totalStorage + totalGPU + totalNetwork + totalLB + totalSharedCounted) * monthlyMultiplier,
 		CarbonCost:             totalCarbon * monthlyMultiplier,
 		SharedCost:             totalShared * monthlyMultiplier,
+		SharedCostIncluded:     totalSharedCounted > 0,
 		SharedCostBreakdown:    scaledSharedBreakdown,
 	}
 
@@ -1291,6 +1785,10 @@ func parseOpenCostResponse(resp AllocationResponse, startTime, endTime time.Time
 // PricingSource="unknown" rather than failing the caller — data quality is
 // advisory, not load-bearing.
 func (c *Client) GetDataQuality(ctx context.Context) (*models.DataQuality, error) {
+	if c.kubecost {
+		// Kubecost has no pricingSourceStatus; asking would only log a 404 for every viewer's refresh.
+		return &models.DataQuality{PricingSource: "unknown", Message: "Kubecost does not report its pricing source through its API"}, nil
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/pricingSourceStatus", http.NoBody)
 	if err != nil {
 		return &models.DataQuality{PricingSource: "unknown", Message: "failed to build request"}, nil
@@ -1347,9 +1845,41 @@ type AssetsResponse struct {
 	Data map[string]AssetData `json:"data"`
 }
 
+// UnmarshalJSON reads data as one set of assets, or as a list of sets, which Kubecost answers with
+// unless the request accumulates. The sets of a list are merged; their keys don't repeat an asset
+// across days that were accumulated, and a repeated key keeps the last.
+func (r *AssetsResponse) UnmarshalJSON(b []byte) error {
+	var raw struct {
+		Code int             `json:"code"`
+		Data json.RawMessage `json:"data"`
+	}
+	if err := json.Unmarshal(b, &raw); err != nil {
+		return err
+	}
+	r.Code = raw.Code
+	r.Data = map[string]AssetData{}
+	data := strings.TrimSpace(string(raw.Data))
+	switch {
+	case data == "" || data == "null":
+		return nil
+	case strings.HasPrefix(data, "["):
+		var sets []map[string]AssetData
+		if err := json.Unmarshal(raw.Data, &sets); err != nil {
+			return err
+		}
+		for _, set := range sets {
+			maps.Copy(r.Data, set)
+		}
+		return nil
+	default:
+		return json.Unmarshal(raw.Data, &r.Data)
+	}
+}
+
 type AssetProperties struct {
 	Provider string `json:"provider"`
 	Cluster  string `json:"cluster"`
+	Name     string `json:"name"`
 }
 
 type AssetData struct {
@@ -1358,6 +1888,135 @@ type AssetData struct {
 	Type       string          `json:"type"`
 	Properties AssetProperties `json:"properties"`
 	TotalCost  float64         `json:"totalCost"`
+	// ClaimName, ClaimNamespace and VolumeName are a disk's: the PersistentVolumeClaim bound to it
+	// (Kubecost leaves its namespace empty) and the PV's name.
+	ClaimName      string `json:"claimName"`
+	ClaimNamespace string `json:"claimNamespace"`
+	VolumeName     string `json:"volumeName"`
+}
+
+// claimRef is the PersistentVolumeClaim of a volume; namespace is empty when the provider does not say.
+type claimRef struct{ namespace, name string }
+
+// volumeClaims maps each PV of a cluster to its claim, for the claims no other volume of the cluster has.
+type volumeClaims struct {
+	byVolume map[string]claimRef
+	readAt   time.Time
+}
+
+// volumeClaimsTTL is how long a cluster's claims are kept: they change as volumes are created, and
+// every namespace measured reads them.
+const volumeClaimsTTL = 10 * time.Minute
+
+// volumeClaims reads the claim of every volume in the cluster from the disks the provider lists, once
+// per volumeClaimsTTL.
+func (c *Client) volumeClaims(ctx context.Context) (volumeClaims, error) {
+	cluster := c.clusterOf(ctx)
+	c.volumeMu.Lock()
+	defer c.volumeMu.Unlock()
+	if cached, ok := c.volumeCache[cluster]; ok && time.Since(cached.readAt) < volumeClaimsTTL {
+		return cached, nil
+	}
+
+	params := url.Values{}
+	params.Set("window", "24h")
+	if c.kubecost {
+		params.Set("accumulate", "true")
+		if cluster != "" {
+			params.Set("filter", fmt.Sprintf("cluster:%q", cluster))
+		}
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/assets?"+params.Encode(), http.NoBody)
+	if err != nil {
+		return volumeClaims{}, fmt.Errorf("creating assets request: %w", err)
+	}
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return volumeClaims{}, fmt.Errorf("executing assets request: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return volumeClaims{}, fmt.Errorf("opencost returned status %d: %s", resp.StatusCode, body)
+	}
+	var result AssetsResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return volumeClaims{}, fmt.Errorf("decoding assets response: %w", err)
+	}
+
+	claims := volumeClaimsOf(result)
+	if c.volumeCache == nil {
+		c.volumeCache = map[string]volumeClaims{}
+	}
+	c.volumeCache[cluster] = claims
+	return claims, nil
+}
+
+// volumeClaimsOf maps PV names to their claims, leaving out a claim more than one disk has: without the
+// namespace of each, it could be any of them.
+func volumeClaimsOf(assets AssetsResponse) volumeClaims {
+	uses := map[claimRef]int{}
+	names := map[string]int{}
+	for _, asset := range assets.Data {
+		if strings.EqualFold(asset.Type, "Disk") && asset.ClaimName != "" {
+			uses[claimRef{asset.ClaimNamespace, asset.ClaimName}]++
+			names[asset.ClaimName]++
+		}
+	}
+	claims := volumeClaims{byVolume: map[string]claimRef{}, readAt: time.Now()}
+	for _, asset := range assets.Data {
+		if !strings.EqualFold(asset.Type, "Disk") || asset.ClaimName == "" {
+			continue
+		}
+		ref := claimRef{asset.ClaimNamespace, asset.ClaimName}
+		pv := asset.VolumeName
+		if pv == "" {
+			pv = asset.Properties.Name
+		}
+		if pv != "" && uses[ref] == 1 && (ref.namespace != "" || names[ref.name] == 1) {
+			claims.byVolume[pv] = ref
+		}
+	}
+	return claims
+}
+
+// ListClusters returns the names of the clusters a Kubecost aggregator has cost for over the last day,
+// sorted. It is not scoped to a cluster: the point is to see them all. OpenCost knows only its own.
+func (c *Client) ListClusters(ctx context.Context) ([]string, error) {
+	if !c.kubecost {
+		return nil, nil
+	}
+	params := url.Values{}
+	params.Set("window", "24h")
+	params.Set("aggregate", "cluster")
+	params.Set("accumulate", "true")
+	params.Set("includeIdle", "false")
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/allocation?"+params.Encode(), http.NoBody)
+	if err != nil {
+		return nil, fmt.Errorf("creating clusters request: %w", err)
+	}
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("executing clusters request: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("opencost returned status %d: %s", resp.StatusCode, body)
+	}
+	var result AllocationResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("decoding clusters response: %w", err)
+	}
+	seen := map[string]bool{}
+	for _, set := range result.Data {
+		for key := range set {
+			if key != "" && !isVirtualAllocation(key) {
+				seen[key] = true
+			}
+		}
+	}
+	return slices.Sorted(maps.Keys(seen)), nil
 }
 
 // GetClusterOverhead fetches the ClusterManagement asset (EKS/GKE/AKS control-plane
@@ -1371,6 +2030,12 @@ func (c *Client) GetClusterOverhead(ctx context.Context) (*models.ClusterOverhea
 	}
 	q := u.Query()
 	q.Set("window", "24h")
+	if c.kubecost {
+		q.Set("accumulate", "true")
+		if id := c.clusterOf(ctx); id != "" {
+			q.Set("filter", fmt.Sprintf("cluster:%q", id))
+		}
+	}
 	u.RawQuery = q.Encode()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), http.NoBody)

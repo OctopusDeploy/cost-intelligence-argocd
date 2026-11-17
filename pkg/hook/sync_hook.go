@@ -40,6 +40,10 @@ type SyncHook struct {
 	measureDelay time.Duration
 	logger       *log.Logger
 	retries      *retries
+	scope        exporter.Scope
+	// applications tell whether the application is the only one in its namespace; without them, the
+	// volumes no pod mounts stay in the namespace's cost.
+	applications exporter.ApplicationLister
 }
 
 // retries are the pending retries of syncs measured without OpenCost data, at most one per
@@ -79,7 +83,21 @@ func NewSyncHook(
 		costStorage:  costStorage,
 		measureDelay: measureDelay,
 		logger:       logger,
+		scope:        exporter.LocalOnly{},
 	}
+}
+
+// WithScope has the hook measure the clusters scope maps, instead of only the one Argo CD runs in.
+func (h *SyncHook) WithScope(scope exporter.Scope) *SyncHook {
+	h.scope = scope
+	return h
+}
+
+// DeploysHere reports whether the notification's application deploys to a cluster whose cost is
+// measured. Elsewhere, a namespace of the same name here is not the application's.
+func (h *SyncHook) DeploysHere(n *models.SyncNotification) bool {
+	_, ok := h.scope.ClusterFor(destination(n))
+	return ok
 }
 
 // RetryWithoutData measures a sync again after each of delays while OpenCost has no data for its
@@ -121,9 +139,9 @@ func (h *SyncHook) OnApplicationSync(ctx context.Context, notification *models.S
 	}
 
 	app := models.AppRef{Namespace: notification.ApplicationNamespace, Name: notification.ApplicationName}
-	if !DeploysHere(notification) {
+	if !h.DeploysHere(notification) {
 		h.OnRemoteSync(app)
-		h.logger.Printf("Not measuring %s/%s: it deploys to another cluster (%s), and OpenCost measures only this one\n",
+		h.logger.Printf("Not measuring %s/%s: it deploys to another cluster (%s) that is not mapped to a cluster of the cost backend\n",
 			notification.ApplicationNamespace, notification.ApplicationName, cluster(notification))
 		return nil
 	}
@@ -327,7 +345,35 @@ func (r *retries) finish(app models.AppRef, p *pendingRetry) {
 	p.cancel()
 }
 
+// WithApplications lets the hook tell when an application is the only one deploying to its namespace,
+// which then owns the volumes no pod mounts.
+func (h *SyncHook) WithApplications(applications exporter.ApplicationLister) *SyncHook {
+	h.applications = applications
+	return h
+}
+
+// soleApplication reports whether app is the only Application deploying to the namespace it was
+// notified for. An Application list that can't be read is no: the volumes stay in the namespace.
+func (h *SyncHook) soleApplication(ctx context.Context, app models.AppRef, cluster, namespace string) bool {
+	if h.applications == nil {
+		return false
+	}
+	apps, err := h.applications.List(ctx)
+	if err != nil {
+		h.logger.Printf("Warning: listing Applications for %s: %v\n", namespace, err)
+		return false
+	}
+	sole, ok := exporter.SoleApplication(apps, h.scope, cluster, namespace)
+	return ok && sole == app
+}
+
 func (h *SyncHook) measureActualCosts(ctx context.Context, notification *models.SyncNotification) (*models.CostActual, error) {
+	// A sync and its retries read the cluster the application deploys to.
+	var cluster string
+	if id, ok := h.scope.ClusterFor(destination(notification)); ok {
+		ctx = opencost.WithCluster(ctx, id)
+		cluster = id
+	}
 	measured, err := MeasureNamespace(ctx, h.opencostCli, notification.Namespace, h.logger)
 	if err != nil {
 		return nil, err
@@ -339,9 +385,10 @@ func (h *SyncHook) measureActualCosts(ctx context.Context, notification *models.
 	// known only as its whole namespace.
 	var owners models.ManagedResources
 	if notification.Resources != nil {
-		owners = models.ManagedResources(notification.Resources).PodOwners()
+		owners = models.ManagedResources(notification.Resources).Measured()
 	}
 	app := models.AppRef{Namespace: notification.ApplicationNamespace, Name: notification.ApplicationName}
+	measured.SoleApplication(h.soleApplication(ctx, app, cluster, notification.Namespace))
 	return measured.Record(app, owners, notification.SyncTimestamp, models.MeasuredOnSync), nil
 }
 
@@ -435,6 +482,14 @@ func MeasureNamespace(ctx context.Context, client *opencost.Client, namespace st
 	return measured, nil
 }
 
+// SoleApplication tells the measurement whether one application is the only one deploying to the
+// namespace: it then owns the volumes no pod mounts. Call it before Record.
+func (n *Namespace) SoleApplication(sole bool) {
+	if n.pods != nil {
+		n.pods.SoleApplication(sole)
+	}
+}
+
 // HasData reports whether OpenCost had enough data for the namespace. Without it, the namespace's cost
 // is unknown rather than zero. A namespace OpenCost has seen for less than opencost.MinMeasuredPeriod,
 // with or without a cost yet, is no data either: the retries measure it again once it has more.
@@ -505,7 +560,7 @@ func ValidateNotification(n *models.SyncNotification) error {
 	if n.ApplicationNamespace == "" {
 		return errors.New("application namespace is required: the notifications template must send {{.app.metadata.namespace}} as applicationNamespace")
 	}
-	if !models.ManagedResources(n.Resources).PodOwners().Valid() {
+	if !models.ManagedResources(n.Resources).Measured().Valid() {
 		return errors.New("invalid resources: every pod-owning resource needs a valid Kubernetes name")
 	}
 	if !validation.IsValidNamespace(n.ApplicationNamespace) {
@@ -521,7 +576,11 @@ func ValidateNotification(n *models.SyncNotification) error {
 // runs in, the only one its OpenCost measures. Elsewhere, a namespace of the same name here is not the
 // application's.
 func DeploysHere(n *models.SyncNotification) bool {
-	return exporter.Destination{Server: n.DestinationServer, Name: n.DestinationName}.Local()
+	return destination(n).Local()
+}
+
+func destination(n *models.SyncNotification) exporter.Destination {
+	return exporter.Destination{Server: n.DestinationServer, Name: n.DestinationName}
 }
 
 func cluster(n *models.SyncNotification) string {

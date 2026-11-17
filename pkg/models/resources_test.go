@@ -16,6 +16,8 @@ func TestManagedResources_OwnsPod(t *testing.T) {
 		{Kind: "Rollout", Name: "api", Namespace: "shop"},
 		{Kind: "Pod", Name: "debug", Namespace: "shop"},
 		{Kind: "DaemonSet", Name: "agent"},
+		{Kind: "Cluster", Name: "pg", Namespace: "shop"},
+		{Kind: "Workflow", Name: "etl", Namespace: "shop"},
 	}
 
 	tests := []struct {
@@ -34,6 +36,15 @@ func TestManagedResources_OwnsPod(t *testing.T) {
 		{"rollout reported as itself", "shop", "rollout", "api", "api-6f7c9-x", true},
 		{"replicaset of the rollout", "shop", "replicaset", "api-6f7c9b8d5", "api-6f7c9b8d5-x", true},
 		{"replicaset named like the rollout", "shop", "replicaset", "api-gateway", "api-gateway-x", false},
+		{"replicaset of the deployment", "shop", "replicaset", "web-7d4b8c9f5", "web-7d4b8c9f5-xk", true},
+		{"replicaset named like the deployment", "shop", "replicaset", "web-api", "web-api-xk", false},
+		{"deployment pod reported without controller", "shop", "", "", "web-7d4b8c9f5-xk2lm", true},
+		{"statefulset pod reported without controller", "shop", "", "", "db-0", true},
+		{"pod named like the deployment but not its", "shop", "", "", "web-api-xk2lm", false},
+		{"cloudnativepg cluster pod", "shop", "cluster", "pg", "pg-1", true},
+		{"cloudnativepg cluster pod reported without controller", "shop", "", "", "pg-2", true},
+		{"cloudnativepg cluster of another kind", "shop", "statefulset", "pg", "pg-1", false},
+		{"custom resource owning pods directly", "shop", "workflow", "etl", "etl-step-1", true},
 		{"bare pod", "shop", "", "", "debug", true},
 		{"bare pod of another name", "shop", "", "", "debug-2", false},
 		{"pod of that name with a controller", "shop", "job", "cleanup", "debug", false},
@@ -48,6 +59,83 @@ func TestManagedResources_OwnsPod(t *testing.T) {
 	}
 }
 
+func TestManagedResources_OwnerOfLabeled(t *testing.T) {
+	t.Parallel()
+
+	resources := ManagedResources{
+		{Kind: "ClickHouseInstallation", Name: "clickhouse-prdata", Namespace: "data"},
+		{Kind: "ZookeeperCluster", Name: "zookeeper-prdata", Namespace: "data"},
+		{Kind: "Deployment", Name: "web", Namespace: "data"},
+	}
+	chPod := map[string]string{"clickhouse_altinity_com_chi": "clickhouse-prdata", "app": "clickhouse"}
+	zkPod := map[string]string{"app": "zookeeper-prdata", "release": "zookeeper-prdata", "kind": "ZookeeperMember"}
+
+	owner, ok := resources.OwnerOfLabeled("data", "statefulset", "chi-clickhouse-prdata-replicated-0-1", "chi-clickhouse-prdata-replicated-0-1-0", chPod)
+	assert.True(t, ok)
+	assert.Equal(t, "clickhouse-prdata", owner.Name)
+
+	// Labels as the backend may report them, unsanitised.
+	assert.True(t, resources.OwnsPodLabeled("data", "statefulset", "chi-x", "chi-x-0", map[string]string{"clickhouse.altinity.com/chi": "clickhouse-prdata"}))
+
+	owner, ok = resources.OwnerOfLabeled("data", "statefulset", "zookeeper-prdata", "zookeeper-prdata-1", zkPod)
+	assert.True(t, ok)
+	assert.Equal(t, "zookeeper-prdata", owner.Name)
+
+	assert.False(t, resources.OwnsPodLabeled("other", "statefulset", "chi-x", "chi-x-0", chPod), "other namespace")
+	assert.False(t, resources.OwnsPodLabeled("data", "statefulset", "chi-x", "chi-x-0", nil), "no labels")
+	assert.False(t, resources.OwnsPodLabeled("data", "statefulset", "x", "x-0", map[string]string{"app": "web"}), "a workload is not claimed by label")
+	assert.False(t, resources.OwnsPodLabeled("data", "statefulset", "x", "x-0", map[string]string{"clickhouse_altinity_com_chi": "other"}))
+}
+
+func TestManagedResources_OpenTelemetryOperator(t *testing.T) {
+	t.Parallel()
+
+	resources := ManagedResources{
+		{Kind: "OpenTelemetryCollector", Name: "otel", Namespace: "obs"},
+		{Kind: "TargetAllocator", Name: "otel", Namespace: "obs"},
+	}
+
+	assert.True(t, resources.OwnsPod("obs", "deployment", "otel-collector", "otel-collector-7d4b8c9f5-xk2lm"))
+	assert.True(t, resources.OwnsPod("obs", "replicaset", "otel-collector-7d4b8c9f5", "otel-collector-7d4b8c9f5-xk2lm"))
+	assert.True(t, resources.OwnsPod("obs", "daemonset", "otel-collector", "otel-collector-abcde"))
+	assert.True(t, resources.OwnsPod("obs", "deployment", "otel-targetallocator", "otel-targetallocator-7d4b8c9f5-xk2lm"))
+	assert.True(t, resources.OwnsPod("obs", "", "", "otel-targetallocator-7d4b8c9f5-xk2lm"), "no controller reported")
+	assert.True(t, resources.OwnsPod("obs", "", "", "otel-collector-0"), "statefulset pod, no controller reported")
+	assert.False(t, resources.OwnsPod("obs", "deployment", "otel-collector-gateway", "otel-collector-gateway-7d4b8c9f5-xk2lm"))
+	assert.False(t, resources.OwnsPod("other", "deployment", "otel-collector", "otel-collector-7d4b8c9f5-xk2lm"))
+
+	assert.True(t, resources.OwnsPodLabeled("obs", "deployment", "x", "x-1", map[string]string{"app.kubernetes.io/instance": "obs.otel"}), "instance label is <namespace>.<name>")
+}
+
+func TestUnownedPodLabels(t *testing.T) {
+	assert.Error(t, ConfigureUnownedPodLabels("=Airflow"))
+	assert.NoError(t, ConfigureUnownedPodLabels("managedby=Airflow"))
+	t.Cleanup(func() { unownedPodLabels = nil })
+
+	resources := ManagedResources{{Kind: "Deployment", Name: "airflow-scheduler", Namespace: "airflow"}}
+	bare := map[string]string{"managedby": "Airflow"}
+
+	owner, ok := resources.OwnerOfLabeled("airflow", "", "", "dbt-build-x1", bare)
+	assert.True(t, ok)
+	assert.Equal(t, "airflow-scheduler", owner.Name)
+	assert.False(t, resources.OwnsPodLabeled("other", "", "", "dbt-build-x1", bare), "other namespace")
+	assert.False(t, resources.OwnsPodLabeled("airflow", "", "", "x", map[string]string{"managedby": "Helm"}), "other value")
+	assert.False(t, resources.OwnsPodLabeled("airflow", "deployment", "foo", "foo-1", bare), "has a controller")
+}
+
+func TestConfigureOwnership(t *testing.T) {
+	// Not parallel: it extends package-level lists.
+	assert.Error(t, ConfigureOwnership("=Foo", ""))
+	assert.Error(t, ConfigureOwnership("foo.io/cluster=", ""))
+	assert.NoError(t, ConfigureOwnership("foo.io/cluster=Foo|FooShard, example.com/owner", "Widget"))
+
+	resources := ManagedResources{{Kind: "Foo", Name: "f1", Namespace: "ns"}, {Kind: "Bar", Name: "b1", Namespace: "ns"}}
+	assert.True(t, resources.OwnsPodLabeled("ns", "statefulset", "gen", "gen-0", map[string]string{"foo.io/cluster": "f1"}))
+	assert.False(t, resources.OwnsPodLabeled("ns", "statefulset", "gen", "gen-0", map[string]string{"foo.io/cluster": "b1"}), "wrong kind")
+	assert.True(t, resources.OwnsPodLabeled("ns", "statefulset", "gen", "gen-0", map[string]string{"example.com/owner": "b1"}))
+	assert.Equal(t, ManagedResources{}, ManagedResources{{Kind: "Widget", Name: "w"}}.PodOwners())
+}
+
 func TestManagedResources_PodOwners(t *testing.T) {
 	t.Parallel()
 
@@ -56,10 +144,27 @@ func TestManagedResources_PodOwners(t *testing.T) {
 		{Kind: "Deployment", Name: "redis"},
 		{Kind: "ConfigMap", Name: "redis-config"},
 		{Kind: "CronJob", Name: "test-cronjob"},
+		{Kind: "Cluster", Name: "pg"},
+		{Kind: "Workflow", Name: "etl"},
 	}
 
-	assert.Equal(t, ManagedResources{{Kind: "Deployment", Name: "redis"}, {Kind: "CronJob", Name: "test-cronjob"}}, resources.PodOwners())
+	assert.Equal(t, ManagedResources{{Kind: "Deployment", Name: "redis"}, {Kind: "CronJob", Name: "test-cronjob"}, {Kind: "Cluster", Name: "pg"}, {Kind: "Workflow", Name: "etl"}}, resources.PodOwners())
 	assert.Equal(t, ManagedResources{}, ManagedResources(nil).PodOwners(), "never nil")
+}
+
+func TestManagedResources_MeasuredAddsClaimsButNeverAsPodOwners(t *testing.T) {
+	t.Parallel()
+
+	resources := ManagedResources{
+		{Kind: "Service", Name: "web"},
+		{Kind: "Deployment", Name: "web"},
+		{Kind: "PersistentVolumeClaim", Name: "builds-1", Namespace: "ci"},
+		{Kind: "PersistentVolumeClaim", Name: "elsewhere", Namespace: "other"},
+	}
+
+	assert.Equal(t, ManagedResources{resources[1], resources[2], resources[3]}, resources.Measured())
+	assert.Equal(t, ManagedResources{resources[1]}, resources.Measured().PodOwners())
+	assert.Equal(t, map[string]bool{"builds-1": true}, resources.Claims("ci"))
 }
 
 func TestManagedResources_Valid(t *testing.T) {

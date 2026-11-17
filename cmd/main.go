@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -17,6 +18,7 @@ import (
 	"k8s.io/client-go/rest"
 
 	"github.com/OctopusDeploy/cost-intelligence-argocd/pkg/backfill"
+	"github.com/OctopusDeploy/cost-intelligence-argocd/pkg/clustermap"
 	"github.com/OctopusDeploy/cost-intelligence-argocd/pkg/clusterscope"
 	"github.com/OctopusDeploy/cost-intelligence-argocd/pkg/config"
 	"github.com/OctopusDeploy/cost-intelligence-argocd/pkg/exporter"
@@ -41,6 +43,12 @@ func main() {
 
 	if err := cfg.Validate(); err != nil {
 		logger.Fatalf("Invalid configuration: %v", err)
+	}
+	if err := models.ConfigureOwnership(cfg.OwnerLabels, cfg.NonOwnerKinds); err != nil {
+		logger.Fatalf("Invalid OWNER_LABELS: %v", err)
+	}
+	if err := models.ConfigureUnownedPodLabels(cfg.UnownedPodLabels); err != nil {
+		logger.Fatalf("Invalid UNOWNED_POD_LABELS: %v", err)
 	}
 
 	if cfg.Mode == config.ModeExporter {
@@ -67,6 +75,31 @@ func runAPI(cfg *config.Config, logger *log.Logger) {
 	}
 
 	serverOpts := []server.Option{server.WithWebhookSecret(cfg.WebhookSecret), server.WithMetrics(metrics)}
+	if cfg.RetentionDays() > 0 {
+		serverOpts = append(serverOpts, server.WithWeeklyAggregates())
+	}
+	opencostClient := newOpenCostClient(cfg, metrics, logger)
+	measured := costScope(cfg, opencostClient, logger)
+	serverOpts = append(serverOpts, server.WithScope(measured))
+	if clusters, ok := measured.(*clustermap.Map); ok {
+		var others []server.MeasuredCluster
+		for _, c := range clusters.Clusters() {
+			others = append(others, server.MeasuredCluster{Server: c.Server, Name: c.Name})
+		}
+		serverOpts = append(serverOpts, server.WithMeasuredClusters(others))
+		choices := []server.ClusterChoice{{ID: cfg.KubecostClusterID, Local: true}}
+		seen := map[string]bool{cfg.KubecostClusterID: true}
+		for _, c := range clusters.Clusters() {
+			if !seen[c.ID] {
+				seen[c.ID] = true
+				choices = append(choices, server.ClusterChoice{ID: c.ID})
+			}
+		}
+		serverOpts = append(serverOpts, server.WithClusters(choices))
+		if cfg.KubecostDiscoverClusters {
+			serverOpts = append(serverOpts, server.WithDiscoveredClusters(clusters.Known))
+		}
+	}
 	if scope := clusterScope(cfg, kubeClient, logger); scope != nil {
 		serverOpts = append(serverOpts, server.WithClusterScope(scope))
 	}
@@ -98,15 +131,13 @@ func runAPI(cfg *config.Config, logger *log.Logger) {
 	}
 	cancel()
 
-	opencostClient := newOpenCostClient(cfg, metrics, logger)
-
 	// Initialize sync hook
 	syncHook := hook.NewSyncHook(
 		opencostClient,
 		costStorage,
 		5*time.Second, // Delay before measuring to allow metrics to propagate
 		logger,
-	)
+	).WithScope(measured)
 
 	// Read VerticalPodAutoscaler recommendations for rightsizing, when running in a cluster.
 	if cfg.VPAEnabled {
@@ -125,6 +156,7 @@ func runAPI(cfg *config.Config, logger *log.Logger) {
 	var applications exporter.ApplicationLister
 	if kubeClient != nil {
 		applications = exporter.NewKubeApplicationLister(kubeClient)
+		syncHook.WithApplications(applications)
 		// The waste ranking is read by every viewer of the Idle spend tab, which refreshes it often.
 		serverOpts = append(serverOpts, server.WithApplications(exporter.NewCachedApplicationLister(applications, time.Minute)))
 	}
@@ -148,7 +180,7 @@ func runAPI(cfg *config.Config, logger *log.Logger) {
 	// Record each application's daily cost, so long ranges do not depend on Prometheus retention.
 	var recorder *history.Recorder
 	if cfg.DailyHistoryDays > 0 {
-		recorder = history.NewRecorder(costStorage, opencostClient, cfg.DailyHistoryDays, logger)
+		recorder = history.NewRecorder(costStorage, opencostClient, cfg.DailyHistoryDays, logger).WithScope(measured).WithRetention(cfg.RetentionDays())
 		if applications != nil {
 			recorder.WithApplications(applications)
 			if cfg.PruneRemoteCost {
@@ -172,7 +204,7 @@ func runAPI(cfg *config.Config, logger *log.Logger) {
 	case applications == nil:
 		logger.Print("Startup backfill off: it lists the Argo CD Applications")
 	default:
-		b := backfill.New(applications, costStorage, opencostClient, cfg.BackfillConcurrency, logger)
+		b := backfill.New(applications, costStorage, opencostClient, cfg.BackfillConcurrency, logger).WithScope(measured)
 		if cfg.PruneRemoteCost {
 			b.PruneRemote()
 		}
@@ -284,14 +316,15 @@ func runExporter(cfg *config.Config, logger *log.Logger) {
 		logger.Fatalf("Failed to create Kubernetes client: %v", err)
 	}
 
+	opencostClient := newOpenCostClient(cfg, metrics, logger)
 	exp := exporter.New(
 		exporter.NewKubeApplicationLister(kubeClient),
-		exporter.NewOpenCostSource(newOpenCostClient(cfg, metrics, logger)),
+		exporter.NewOpenCostSource(opencostClient),
 		costStorage,
 		cfg.ExporterInterval,
 		logger,
 		registry,
-	)
+	).WithScope(costScope(cfg, opencostClient, logger))
 	ctx, stop := context.WithCancel(context.Background())
 	defer stop()
 	go exp.Run(ctx)
@@ -330,9 +363,35 @@ func logVPAAvailability(ctx context.Context, vpa vpaChecker, logger *log.Logger)
 	}
 }
 
+// costScope says which cluster of the cost backend each Application is measured in: OpenCost measures
+// only the cluster it runs in; Kubecost, the local cluster and those of the cluster map.
+func costScope(cfg *config.Config, client *opencost.Client, logger *log.Logger) exporter.Scope {
+	if cfg.CostProvider != config.ProviderKubecost {
+		return exporter.LocalOnly{}
+	}
+	clusters, err := clustermap.Load(cfg.KubecostClusterID, cfg.KubecostClusterMapFile)
+	if err != nil {
+		logger.Fatalf("Failed to load the Kubecost cluster map: %v", err)
+	}
+	if cfg.KubecostDiscoverClusters {
+		clusters.WithDiscovery(clustermap.NewDiscovery(client.ListClusters, 10*time.Minute))
+	}
+	return clusters
+}
+
 // newOpenCostClient creates the OpenCost client, timing its requests when metrics are on.
 func newOpenCostClient(cfg *config.Config, metrics *telemetry.Metrics, logger *log.Logger) *opencost.Client {
 	var opts []opencost.ClientOption
+	if cfg.CostProvider == config.ProviderKubecost {
+		opts = append(opts, opencost.WithKubecost(cfg.KubecostClusterID))
+		opts = append(opts, opencost.WithSharedCosts(cfg.KubecostShareTenancyCosts, cfg.KubecostShareNamespaces))
+		if name, value := cfg.APIKeyHeader(); name != "" {
+			opts = append(opts, opencost.WithHeader(name, value))
+		}
+	}
+	if cfg.UnmanagedGroupLabels != "" {
+		opts = append(opts, opencost.WithPodGroupLabels(strings.Split(cfg.UnmanagedGroupLabels, ",")))
+	}
 	if metrics != nil {
 		// Validate has checked the URL.
 		base, _ := url.Parse(cfg.OpenCost.BaseURL)

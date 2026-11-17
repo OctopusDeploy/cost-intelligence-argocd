@@ -104,6 +104,7 @@ type Exporter struct {
 	interval  time.Duration
 	logger    *log.Logger
 	now       func() time.Time
+	scope     Scope
 
 	samples  atomic.Pointer[[]sample]
 	ran      atomic.Bool
@@ -111,6 +112,12 @@ type Exporter struct {
 	remote   prometheus.Gauge
 	last     prometheus.Gauge
 	duration prometheus.Gauge
+}
+
+// WithScope has the exporter measure the clusters scope maps, instead of only the one Argo CD runs in.
+func (e *Exporter) WithScope(scope Scope) *Exporter {
+	e.scope = scope
+	return e
 }
 
 // New returns an exporter refreshing every interval, registered on reg.
@@ -122,6 +129,7 @@ func New(apps ApplicationLister, costs CostSource, estimates EstimateSource, int
 		interval:  interval,
 		logger:    logger,
 		now:       time.Now,
+		scope:     LocalOnly{},
 		errors: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: telemetry.Namespace,
 			Name:      "exporter_refresh_errors_total",
@@ -199,7 +207,7 @@ func (e *Exporter) Refresh(ctx context.Context) {
 
 	local := make([]Application, 0, len(apps))
 	for _, app := range apps {
-		if app.Destination.Local() {
+		if _, ok := e.scope.ClusterFor(app.Destination); ok {
 			local = append(local, app)
 		}
 	}
@@ -221,20 +229,41 @@ func (e *Exporter) fail(stage string, err error) {
 // workloads own them. An Application with a workload in a namespace that could not be measured is left
 // out, rather than exported with part of its cost.
 func (e *Exporter) costSamples(ctx context.Context, apps []Application) []sample {
-	namespaces := map[string]bool{}
+	// A namespace is measured once per cluster of the cost backend: the same name in two clusters is
+	// two namespaces.
+	type nsKey struct{ cluster, namespace string }
+	clusterOf := func(app Application) string {
+		id, _ := e.scope.ClusterFor(app.Destination)
+		return id
+	}
+	keys := map[nsKey]bool{}
 	for _, app := range apps {
 		for _, w := range app.Workloads {
-			namespaces[w.Namespace] = true
+			keys[nsKey{clusterOf(app), w.Namespace}] = true
 		}
 	}
-	measured := make(map[string]Costs, len(namespaces))
-	for _, ns := range sortedKeys(namespaces) {
-		costs, err := e.costs.RecentCosts(ctx, ns, Window)
+	ordered := make([]nsKey, 0, len(keys))
+	for k := range keys {
+		ordered = append(ordered, k)
+	}
+	sort.Slice(ordered, func(i, j int) bool {
+		if ordered[i].cluster != ordered[j].cluster {
+			return ordered[i].cluster < ordered[j].cluster
+		}
+		return ordered[i].namespace < ordered[j].namespace
+	})
+	measured := make(map[nsKey]Costs, len(keys))
+	for _, k := range ordered {
+		costs, err := e.costs.RecentCosts(opencost.WithCluster(ctx, k.cluster), k.namespace, Window)
 		if err != nil {
 			e.fail(StageOpenCost, err)
 			continue
 		}
-		measured[ns] = costs
+		if s, ok := costs.(interface{ SoleApplication(bool) }); ok {
+			_, sole := SoleApplication(apps, e.scope, k.cluster, k.namespace)
+			s.SoleApplication(sole)
+		}
+		measured[k] = costs
 	}
 
 	var samples []sample
@@ -250,7 +279,7 @@ func (e *Exporter) costSamples(ctx context.Context, apps []Application) []sample
 		var total opencost.HourlyCost
 		complete := true
 		for ns := range appNamespaces(app) {
-			costs, ok := measured[ns]
+			costs, ok := measured[nsKey{clusterOf(app), ns}]
 			if !ok {
 				complete = false
 				break
@@ -318,6 +347,28 @@ func appNamespaces(app Application) map[string]bool {
 		namespaces[w.Namespace] = true
 	}
 	return namespaces
+}
+
+// SoleApplication returns the Application that is the only one deploying to namespace in cluster, an
+// Application being there when it deploys to it by default or has a workload in it. The access
+// Application is not listed, and Applications measured in another cluster do not count. False when no
+// Application, or several, deploy there.
+func SoleApplication(apps []Application, scope Scope, cluster, namespace string) (models.AppRef, bool) {
+	var sole models.AppRef
+	found := false
+	for _, app := range apps {
+		if id, ok := scope.ClusterFor(app.Destination); !ok || id != cluster {
+			continue
+		}
+		if app.Destination.Namespace != namespace && !appNamespaces(app)[namespace] {
+			continue
+		}
+		if found {
+			return models.AppRef{}, false
+		}
+		sole, found = app.Ref, true
+	}
+	return sole, found
 }
 
 func add(a, b opencost.HourlyCost) opencost.HourlyCost {
