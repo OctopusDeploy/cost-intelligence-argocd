@@ -219,9 +219,9 @@ type AllocationData struct {
 	CarbonCost                   float64                   `json:"carbonCost"`
 	// PVs are the volumes of an allocation by key, read for the unmounted volumes entry only and
 	// cleared once read (unmountedVolumeCosts): a namespace can have hundreds, which are not stored.
-	PVs        map[string]PVAllocation `json:"pvs,omitempty"`
-	Properties                   AllocationProperties      `json:"properties"`
-	RawAllocationOnly            *RawAllocationOnly        `json:"rawAllocationOnly,omitempty"`
+	PVs               map[string]PVAllocation `json:"pvs,omitempty"`
+	Properties        AllocationProperties    `json:"properties"`
+	RawAllocationOnly *RawAllocationOnly      `json:"rawAllocationOnly,omitempty"`
 
 	// countShared adds SharedCost to what the allocation costs. Set when the request asked for costs to
 	// be shared (see Client.countShared); otherwise SharedCost is only reported, as before.
@@ -963,7 +963,7 @@ func (p *PodAllocations) HourlyCostOf(resources models.ManagedResources) HourlyC
 // that deploys it. A claim is matched by its name and, when the provider reports it, its namespace, and
 // only when no other claim in the cluster has that name: a name that repeats could be any of them.
 func (p *PodAllocations) owned(resources models.ManagedResources) AllocationResponse {
-	owned := ownedAllocations(p.resp, p.namespace, resources.PodOwners())
+	owned := ownedAllocations(p.resp, p.namespace, resources.PodOwners(), p.soleApplication)
 	claims := resources.Claims(p.namespace)
 	var cost float64
 	if !p.soleApplication {
@@ -1008,8 +1008,10 @@ func (p *PodAllocations) owned(resources models.ManagedResources) AllocationResp
 	return owned
 }
 
-// ownedAllocations keeps the pod allocations the resources own, dropping OpenCost's virtual entries.
-func ownedAllocations(resp AllocationResponse, namespace string, resources models.ManagedResources) AllocationResponse {
+// ownedAllocations keeps the pod allocations the resources own, dropping OpenCost's virtual entries. The
+// namespace's only application (sole) also owns its pods without a controller that carry an unowned pod
+// label: with several applications each would claim them.
+func ownedAllocations(resp AllocationResponse, namespace string, resources models.ManagedResources, sole bool) AllocationResponse {
 	owned := AllocationResponse{Code: resp.Code, Data: make([]map[string]AllocationData, 0, len(resp.Data))}
 	for _, allocations := range resp.Data {
 		kept := make(map[string]AllocationData)
@@ -1025,7 +1027,8 @@ func ownedAllocations(resp AllocationResponse, namespace string, resources model
 			if ns == "" {
 				ns = namespace
 			}
-			if resources.OwnsPodLabeled(ns, alloc.Properties.ControllerKind, alloc.Properties.Controller, pod, alloc.Properties.Labels) {
+			if resources.OwnsPodLabeled(ns, alloc.Properties.ControllerKind, alloc.Properties.Controller, pod, alloc.Properties.Labels) ||
+				sole && resources.OwnsUnownedPod(ns, alloc.Properties.ControllerKind, alloc.Properties.Controller, alloc.Properties.Labels) {
 				kept[key] = alloc
 			}
 		}
@@ -1891,6 +1894,7 @@ func (c *Client) kubecostDataQuality(ctx context.Context) *models.DataQuality {
 	}
 	return &models.DataQuality{PricingSource: "estimated", Message: "No Kubecost cloud billing integration is active and valid; on-demand list prices are used"}
 }
+
 // AssetsResponse mirrors the top-level shape of GET /assets: one set of assets for the
 // window, keyed by their properties joined with "/". OpenCost ignores `aggregate` here,
 // so an asset is found by its type, not by its key.

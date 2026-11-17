@@ -97,7 +97,7 @@ type Config struct {
 	NonOwnerKinds string `envconfig:"NON_OWNER_KINDS"`
 
 	// UnownedPodLabels attributes the pods that have no controller (bare pods created by Airflow's
-	// Kubernetes executor, for example) to the application of their namespace when they carry one of
+	// Kubernetes executor, for example) to the only application of their namespace when they carry one of
 	// these labels: comma-separated "<label>=<value>" or "<label>". See models.ConfigureUnownedPodLabels.
 	// The default charges GitLab Runner's CI job pods to the application deploying the runner.
 	UnownedPodLabels string `envconfig:"UNOWNED_POD_LABELS" default:"project.runner.gitlab.com/name"`

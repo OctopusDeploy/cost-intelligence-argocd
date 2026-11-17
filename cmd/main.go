@@ -156,9 +156,11 @@ func runAPI(cfg *config.Config, logger *log.Logger) {
 	var applications exporter.ApplicationLister
 	if kubeClient != nil {
 		applications = exporter.NewKubeApplicationLister(kubeClient)
-		syncHook.WithApplications(applications)
-		// The waste ranking is read by every viewer of the Idle spend tab, which refreshes it often.
-		serverOpts = append(serverOpts, server.WithApplications(exporter.NewCachedApplicationLister(applications, time.Minute)))
+		// The waste ranking is read by every viewer of the Idle spend tab, which refreshes it often, and
+		// every sync asks whether its application is alone in its namespace.
+		cached := exporter.NewCachedApplicationLister(applications, time.Minute)
+		syncHook.WithApplications(cached)
+		serverOpts = append(serverOpts, server.WithApplications(cached))
 	}
 
 	// Initialize API server

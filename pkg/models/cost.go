@@ -260,19 +260,19 @@ type OpenCostMetrics struct {
 }
 
 type AllocationTotal struct {
-	CPUCost                float64            `json:"cpuCost"`
-	MemoryCost             float64            `json:"memoryCost"`
-	StorageCost            float64            `json:"storageCost"`
-	GPUCost                float64            `json:"gpuCost"`
-	NetworkCost            float64            `json:"networkCost"`
-	NetworkCrossZoneCost   float64            `json:"networkCrossZoneCost,omitempty"`
-	NetworkCrossRegionCost float64            `json:"networkCrossRegionCost,omitempty"`
-	NetworkInternetCost    float64            `json:"networkInternetCost,omitempty"`
-	NetworkNatGatewayCost  float64            `json:"networkNatGatewayCost,omitempty"`
-	LoadBalancerCost       float64            `json:"loadBalancerCost"`
-	TotalCost              float64            `json:"totalCost"`
-	CarbonCost             float64            `json:"carbonCost"`
-	SharedCost             float64            `json:"sharedCost,omitempty"`
+	CPUCost                float64 `json:"cpuCost"`
+	MemoryCost             float64 `json:"memoryCost"`
+	StorageCost            float64 `json:"storageCost"`
+	GPUCost                float64 `json:"gpuCost"`
+	NetworkCost            float64 `json:"networkCost"`
+	NetworkCrossZoneCost   float64 `json:"networkCrossZoneCost,omitempty"`
+	NetworkCrossRegionCost float64 `json:"networkCrossRegionCost,omitempty"`
+	NetworkInternetCost    float64 `json:"networkInternetCost,omitempty"`
+	NetworkNatGatewayCost  float64 `json:"networkNatGatewayCost,omitempty"`
+	LoadBalancerCost       float64 `json:"loadBalancerCost"`
+	TotalCost              float64 `json:"totalCost"`
+	CarbonCost             float64 `json:"carbonCost"`
+	SharedCost             float64 `json:"sharedCost,omitempty"`
 	// SharedCostIncluded says SharedCost is part of TotalCost (it was asked for: tenancy costs or shared
 	// namespaces). Otherwise SharedCost is only reported and TotalCost leaves it out.
 	SharedCostIncluded  bool               `json:"sharedCostIncluded,omitempty"`

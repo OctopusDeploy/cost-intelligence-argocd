@@ -65,7 +65,10 @@ var resourceName = regexp.MustCompile(`^[a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?$`)
 func (rs ManagedResources) PodOwners() ManagedResources {
 	owners := ManagedResources{}
 	for _, r := range rs {
-		if !nonPodOwnerKinds[strings.ToLower(r.Kind)] {
+		kind := strings.ToLower(r.Kind)
+		// A custom resource with a name that is no Kubernetes name (some CRDs allow any) is left out
+		// rather than failing the notification; a workload with one is a bad notification (Valid).
+		if !nonPodOwnerKinds[kind] && (workloadKinds[kind] || resourceName.MatchString(r.Name)) {
 			owners = append(owners, r)
 		}
 	}
@@ -257,7 +260,7 @@ type unownedPodLabel struct{ key, value string }
 
 var unownedPodLabels []unownedPodLabel
 
-// ConfigureUnownedPodLabels sets the labels that attribute controller-less pods to the application
+// ConfigureUnownedPodLabels sets the labels that attribute controller-less pods to the only application
 // deployed in their namespace: a comma-separated list of "<label>=<value>" or "<label>" (any value),
 // for example "managedby=Airflow". It must be called once at startup.
 func ConfigureUnownedPodLabels(spec string) error {
@@ -322,18 +325,31 @@ func (rs ManagedResources) OwnerOfLabeled(namespace, controllerKind, controller,
 			}
 		}
 	}
-	if controller == "" || strings.EqualFold(controllerKind, "pod") {
-		for _, u := range unownedPodLabels {
-			if v, ok := normalised[u.key]; ok && (u.value == "" || u.value == v) {
-				for _, r := range rs {
-					if r.Namespace == "" || r.Namespace == namespace {
-						return r, true
-					}
+	return ManagedResource{}, false
+}
+
+// OwnsUnownedPod reports whether a pod with no controller carries one of the unowned pod labels
+// (UNOWNED_POD_LABELS) while the resources deploy to its namespace. Each application of a namespace
+// would claim such a pod, so a caller applies it only to the namespace's sole application, which then
+// owns every unowned pod there once.
+func (rs ManagedResources) OwnsUnownedPod(namespace, controllerKind, controller string, labels map[string]string) bool {
+	if controller != "" && !strings.EqualFold(controllerKind, "pod") {
+		return false
+	}
+	normalised := make(map[string]string, len(labels))
+	for k, v := range labels {
+		normalised[labelKey(k)] = v
+	}
+	for _, u := range unownedPodLabels {
+		if v, ok := normalised[u.key]; ok && (u.value == "" || u.value == v) {
+			for _, r := range rs {
+				if r.Namespace == "" || r.Namespace == namespace {
+					return true
 				}
 			}
 		}
 	}
-	return ManagedResource{}, false
+	return false
 }
 
 // OwnerOf returns the resource that owns a pod, given the namespace, controller kind and controller

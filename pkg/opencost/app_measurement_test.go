@@ -328,3 +328,21 @@ func TestPodAllocations_namespaceFallbackAndVirtualEntries(t *testing.T) {
 		assert.NotContains(t, p.Name, "__")
 	}
 }
+
+func TestForApplication_UnownedPodsGoToTheSoleApplicationOnly(t *testing.T) {
+	// Not parallel: the unowned pod labels are package-level.
+	require.NoError(t, models.ConfigureUnownedPodLabels("runner.example.com/job"))
+
+	pods := &PodAllocations{namespace: "ci", resp: AllocationResponse{Data: []map[string]AllocationData{{
+		"web-1": {CPUCost: 1, Properties: AllocationProperties{Pod: "web-1", Controller: "web", ControllerKind: "deployment"}},
+		"job-1": {CPUCost: 4, Properties: AllocationProperties{Pod: "job-1", Labels: map[string]string{"runner_example_com_job": "x"}}},
+	}}}}
+	resources := models.ManagedResources{{Kind: "Deployment", Name: "web", Namespace: "ci"}}
+
+	shared := pods.ForApplication(resources)
+	require.Len(t, shared.Pods, 1, "with several applications in the namespace each would claim the job pod")
+
+	pods.SoleApplication(true)
+	alone := pods.ForApplication(resources)
+	assert.Len(t, alone.Pods, 2)
+}

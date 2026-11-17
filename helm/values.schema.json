@@ -110,7 +110,7 @@
         "unownedPodLabels": {
           "type": "array",
           "items": { "type": "string" },
-          "description": "Labels attributing controller-less pods to the Application of their namespace (UNOWNED_POD_LABELS): '<label>=<value>' or '<label>'."
+          "description": "Labels attributing controller-less pods to the only Application of their namespace (UNOWNED_POD_LABELS): '<label>=<value>' or '<label>'."
         },
         "database": {
           "type": "object",

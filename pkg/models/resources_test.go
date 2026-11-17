@@ -115,12 +115,13 @@ func TestUnownedPodLabels(t *testing.T) {
 	resources := ManagedResources{{Kind: "Deployment", Name: "airflow-scheduler", Namespace: "airflow"}}
 	bare := map[string]string{"managedby": "Airflow"}
 
-	owner, ok := resources.OwnerOfLabeled("airflow", "", "", "dbt-build-x1", bare)
-	assert.True(t, ok)
-	assert.Equal(t, "airflow-scheduler", owner.Name)
-	assert.False(t, resources.OwnsPodLabeled("other", "", "", "dbt-build-x1", bare), "other namespace")
-	assert.False(t, resources.OwnsPodLabeled("airflow", "", "", "x", map[string]string{"managedby": "Helm"}), "other value")
-	assert.False(t, resources.OwnsPodLabeled("airflow", "deployment", "foo", "foo-1", bare), "has a controller")
+	assert.True(t, resources.OwnsUnownedPod("airflow", "", "", bare))
+	assert.True(t, resources.OwnsUnownedPod("airflow", "pod", "dbt-build-x1", bare), "a pod is its own controller")
+	assert.False(t, resources.OwnsUnownedPod("other", "", "", bare), "other namespace")
+	assert.False(t, resources.OwnsUnownedPod("airflow", "", "", map[string]string{"managedby": "Helm"}), "other value")
+	assert.False(t, resources.OwnsUnownedPod("airflow", "deployment", "foo", bare), "has a controller")
+	assert.False(t, ManagedResources{}.OwnsUnownedPod("airflow", "", "", bare), "no resource deploys there")
+	assert.False(t, resources.OwnsPodLabeled("airflow", "", "", "dbt-build-x1", bare), "never by the labels alone: only the sole application owns these")
 }
 
 func TestConfigureOwnership(t *testing.T) {
@@ -150,6 +151,10 @@ func TestManagedResources_PodOwners(t *testing.T) {
 
 	assert.Equal(t, ManagedResources{{Kind: "Deployment", Name: "redis"}, {Kind: "CronJob", Name: "test-cronjob"}, {Kind: "Cluster", Name: "pg"}, {Kind: "Workflow", Name: "etl"}}, resources.PodOwners())
 	assert.Equal(t, ManagedResources{}, ManagedResources(nil).PodOwners(), "never nil")
+
+	odd := ManagedResources{{Kind: "Widget", Name: "Not A Name"}, {Kind: "Deployment", Name: "Bad Name"}}
+	assert.Equal(t, ManagedResources{{Kind: "Deployment", Name: "Bad Name"}}, odd.PodOwners(), "a custom resource with a free-form name is skipped, a workload's is kept to fail Valid")
+	assert.False(t, odd.PodOwners().Valid())
 }
 
 func TestManagedResources_MeasuredAddsClaimsButNeverAsPodOwners(t *testing.T) {

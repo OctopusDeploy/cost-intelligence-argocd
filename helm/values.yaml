@@ -79,7 +79,7 @@ costIntelligence:
   # Every other kind, custom resources included, may own pods.
   nonOwnerKinds: []
 
-  # Labels that attribute pods with no controller to the Application deployed in their namespace
+  # Labels that attribute pods with no controller to the only Application deployed in their namespace
   # (UNOWNED_POD_LABELS), for tools that create bare pods, such as Airflow's Kubernetes executor.
   # "<label>=<value>" or "<label>" for any value. Empty uses the service's default,
   # project.runner.gitlab.com/name, which charges GitLab Runner's CI job pods to the Application
