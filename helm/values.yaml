@@ -57,6 +57,36 @@ costIntelligence:
   # targeting this cluster by its API server URL or a renamed in-cluster entry counts as remote.
   pruneRemoteCost: false
 
+  # Extra pod labels that name the custom resource owning a pod, added to the built-in ones
+  # (OWNER_LABELS). For an operator that creates its own StatefulSets or Deployments, which Argo CD
+  # does not list, the pods are matched to the listed resource whose name is the label's value.
+  # "<label>=<Kind>|<Kind>" limits it to those kinds; "<label>" alone matches any custom resource.
+  # Built in: clickhouse.altinity.com/chi, cnpg.io/cluster, strimzi.io/cluster,
+  # elasticsearch.k8s.elastic.co/cluster-name, kibana.k8s.elastic.co/name, and app,
+  # app.kubernetes.io/instance, app.kubernetes.io/name, release for any custom resource.
+  ownerLabels: []
+  # - foo.io/cluster=Foo|FooShard
+
+  # Pod labels whose values group the pods no Argo CD application manages, in the namespace view
+  # (UNMANAGED_GROUP_LABELS): a group's name is the values present, joined by " / ". The default
+  # lists the CI job pods of GitLab Runner by team and project. [] turns grouping off. Presentation
+  # only: it never assigns cost to an application.
+  unmanagedGroupLabels:
+    - team
+    - project.runner.gitlab.com/name
+
+  # Extra kinds Argo CD lists that never own pods (NON_OWNER_KINDS), left out of the cost match.
+  # Every other kind, custom resources included, may own pods.
+  nonOwnerKinds: []
+
+  # Labels that attribute pods with no controller to the Application deployed in their namespace
+  # (UNOWNED_POD_LABELS), for tools that create bare pods, such as Airflow's Kubernetes executor.
+  # "<label>=<value>" or "<label>" for any value. Empty uses the service's default,
+  # project.runner.gitlab.com/name, which charges GitLab Runner's CI job pods to the Application
+  # that deploys the runner.
+  unownedPodLabels: []
+  # - managedby=Airflow
+
   # PostgreSQL connection pool per replica (DB_MAX_OPEN_CONNS, DB_MAX_IDLE_CONNS). Keep
   # replicas x maxOpenConns below PostgreSQL's max_connections.
   database:
@@ -176,6 +206,46 @@ openCost:
   # Default assumes OpenCost is installed in 'opencost' namespace
   baseURL: http://opencost.opencost:9003
   timeout: 10s
+  # The service baseURL points at: opencost, or kubecost (Kubecost 3.1, experimental).
+  # For Kubecost, through its cost-analyzer frontend the URL ends in /model, for example
+  # http://kubecost-cost-analyzer.kubecost:9090/model. The aggregator service answers on its own port
+  # without that prefix, for example http://kubecost-aggregator.kubecost:9004.
+  provider: opencost
+  # Kubecost only: this cluster's name in Kubecost. Required, because a Kubecost aggregator
+  # answers for every cluster it knows and a namespace that exists in several would be summed.
+  kubecostClusterID: ""
+  # Kubecost only: the other clusters Argo CD deploys to, by their name in Kubecost. An Application
+  # whose destination is one of them is measured in that cluster; any other remote one is not measured.
+  # Match by the destination's server URL, its registered name, or both (either is enough). The cluster
+  # Argo CD runs in may be registered again under another name or URL: add that one with this
+  # cluster's own id (openCost.kubecostClusterID).
+  #   - id: eks-prod-eu
+  #     server: https://ABCD.gr7.eu-west-1.eks.amazonaws.com
+  #     name: prod-eu
+  kubecostClusters: []
+  # Kubecost only: an Argo CD cluster registered under the name Kubecost itself uses for it (ignoring
+  # case) is measured without an entry above. A name that differs, such as a second name for the cluster
+  # Argo CD runs in, still needs one. The service reads Kubecost's cluster names for this.
+  discoverClusters: true
+  # Kubecost only: the EKS-optimized Kubecost keeps 15 days. History is then read in windows of at most
+  # 15 days, and the UI draws long ranges by week, never by month.
+  eksOptimized: false
+  # Kubecost only: spread Kubecost's tenancy costs (cluster-level costs no namespace owns) over the
+  # applications, in proportion to their cost, and count that share in what each costs. Off by default:
+  # an application then costs what its own pods, volumes and network cost.
+  shareTenancyCosts: true
+  # Kubecost only: namespaces whose cost, in the same cluster, is spread over that cluster's applications,
+  # in proportion to their cost, for example [kube-system]. A shared namespace is not measured itself.
+  # Empty shares none.
+  shareNamespaces: []
+  # Kubecost only: a protected aggregator wants an API key. The key is read from a Secret you create,
+  # never from these values:
+  #   kubectl -n <namespace> create secret generic kubecost-api-key --from-literal=api-key=...
+  apiKey:
+    existingSecret: ""
+    key: api-key
+    # Sent as "Bearer <key>" for Authorization, as the key itself for any other header.
+    header: Authorization
 
 # Argo CD Notifications Integration
 argoCd:

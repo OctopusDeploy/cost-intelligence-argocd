@@ -92,6 +92,26 @@
           "type": "boolean",
           "description": "Delete cost stored for Applications on another cluster (PRUNE_REMOTE_COST). Can't be undone."
         },
+        "ownerLabels": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Extra pod labels naming the custom resource that owns a pod (OWNER_LABELS): '<label>=<Kind>|<Kind>', or '<label>' for any custom resource."
+        },
+        "nonOwnerKinds": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Extra kinds that never own pods (NON_OWNER_KINDS)."
+        },
+        "unmanagedGroupLabels": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Pod labels whose values group the pods no Argo CD application manages (UNMANAGED_GROUP_LABELS). Empty turns grouping off."
+        },
+        "unownedPodLabels": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Labels attributing controller-less pods to the Application of their namespace (UNOWNED_POD_LABELS): '<label>=<value>' or '<label>'."
+        },
         "database": {
           "type": "object",
           "properties": {
@@ -307,6 +327,57 @@
         "timeout": {
           "type": "string",
           "description": "OpenCost request timeout. A Go duration such as 10s or 5m."
+        },
+        "provider": {
+          "type": "string",
+          "enum": ["opencost", "kubecost"],
+          "description": "The service baseURL points at (COST_PROVIDER). Kubecost support is experimental."
+        },
+        "kubecostClusterID": {
+          "type": "string",
+          "description": "Kubecost only: this cluster's name in Kubecost (KUBECOST_CLUSTER_ID). Required with provider kubecost."
+        },
+        "discoverClusters": {
+          "type": "boolean",
+          "description": "Kubecost only: measure an Argo CD cluster registered under the name Kubecost uses (KUBECOST_DISCOVER_CLUSTERS)."
+        },
+        "eksOptimized": {
+          "type": "boolean",
+          "description": "Kubecost only: the EKS-optimized Kubecost keeps 15 days (KUBECOST_EKS_OPTIMIZED)."
+        },
+        "shareTenancyCosts": {
+          "type": "boolean",
+          "description": "Kubecost only: spread tenancy costs over the applications and count them in each cost (KUBECOST_SHARE_TENANCY_COSTS)."
+        },
+        "shareNamespaces": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Kubecost only: namespaces whose cost is spread over the applications and counted in each cost (KUBECOST_SHARE_NAMESPACES)."
+        },
+        "apiKey": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Kubecost only: the API key of a protected aggregator, read from an existing Secret.",
+          "properties": {
+            "existingSecret": { "type": "string" },
+            "key": { "type": "string", "minLength": 1 },
+            "header": { "type": "string", "pattern": "^[A-Za-z0-9_-]+$" }
+          }
+        },
+        "kubecostClusters": {
+          "type": "array",
+          "description": "Kubecost only: the other clusters Argo CD deploys to, mapped to their name in Kubecost (KUBECOST_CLUSTER_MAP_FILE).",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id"],
+            "properties": {
+              "id": { "type": "string", "minLength": 1, "description": "The cluster's name in Kubecost." },
+              "server": { "type": "string", "description": "The destination's server URL in Argo CD." },
+              "name": { "type": "string", "description": "The destination's registered cluster name in Argo CD." }
+            },
+            "anyOf": [{ "required": ["server"] }, { "required": ["name"] }]
+          }
         }
       }
     },

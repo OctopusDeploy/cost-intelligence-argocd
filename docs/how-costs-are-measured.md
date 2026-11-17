@@ -13,11 +13,33 @@ After each successful sync, the service asks OpenCost what the application cost 
 
 An application shows no costs until its first measurement.
 
+### In Argo CD's status panel
+
+The application's monthly cost also shows in the status panel of the application page, next to Sync Status and Last Sync. It is the tab's Monthly cost: the Kubernetes cost plus the cloud estimate. The idle part of the CPU and memory requests is already inside the Kubernetes cost, so it is shown as detail ("incl. $X idle") and never added. The item is hidden for an application deploying to a cluster that isn't measured and until the first measurement.
+
 ### The application's own cost
 
 Figures cover only the pods of the workloads Argo CD manages for the application. A CronJob's Jobs and a Rollout's ReplicaSets count under their parent. Other workloads in the same namespace are left out, so applications that share a namespace each see their own cost.
 
 A measurement stored by an earlier version, or sent by a notifications template without the application's resources, covers the whole namespace. On a shared namespace the tab then narrows the monthly cost to the application's pods and says which other figures still cover the whole namespace.
+
+#### Pods without a controller
+
+A pod belongs to the application whose workload owns it. Some pods have no owner Argo CD lists, and are attributed another way, so they are not left out of every application:
+
+- **Operator-created workloads.** Pods of a StatefulSet or Deployment an operator creates (a database or message broker, for example) belong to the custom resource that Argo CD lists, found through the pod's labels. The built-in labels cover the common operators; [`OWNER_LABELS`](configuration.md#backend) adds others, and [`NON_OWNER_KINDS`](configuration.md#backend) names listed kinds that never own pods.
+- **Bare pods.** A pod with no controller, such as a CI job pod created by GitLab Runner or Airflow's Kubernetes executor, is charged to the application deployed in its namespace when it carries one of the [`UNOWNED_POD_LABELS`](configuration.md#backend). The default charges GitLab Runner's job pods (`project.runner.gitlab.com/name`) to the application that deploys the runner. Each pod is counted once, under one application.
+- **Kubecost** reports pods without a controller. They are matched to their Deployment, Rollout, StatefulSet, DaemonSet or Job by the shape of their name.
+
+Pods that still belong to no application stay in the namespace's cost and show as unmanaged in the namespace view.
+
+#### Volumes
+
+A volume mounted by a pod is part of that pod's cost. A claimed volume that no pod mounts, such as a build cache between two jobs, is charged to the application that lists its PersistentVolumeClaim. When one application is the only one deploying to a namespace, it also owns every other unmounted volume there. With several applications, the unmounted volumes they don't list stay in the namespace's cost, so an application is never charged for another's.
+
+#### Grouping job pods
+
+An application with thousands of short-lived pods, such as CI jobs, lists them grouped instead of one by one. A group is named by the values of [`UNMANAGED_GROUP_LABELS`](configuration.md#backend) the pods carry (by default the GitLab team and project), so the cost reads per team and project. Grouping is presentation only; it never changes which application a pod is charged to.
 
 ## Actual costs
 

@@ -63,6 +63,10 @@ The chart can't keep the PVC on uninstall, and it has no switch to run without o
 | `costIntelligence.dailyHistoryDays` | `400` | How many days of each application's daily cost to keep in PostgreSQL (`DAILY_HISTORY_DAYS`), about one row per application per day. OpenCost only answers for the days its Prometheus keeps, often 15, so this history is what lets the Trends tab show months. `0` turns recording off. |
 | `costIntelligence.backfillConcurrency` | `4` | How many namespaces to measure at once when the service starts and finds Applications without a cost record (`BACKFILL_CONCURRENCY`). Replicas take turns, so OpenCost never sees more than this many queries from the backfill. `0` turns it off, and applications then show costs only after their next sync. |
 | `costIntelligence.pruneRemoteCost` | `false` | Delete the cost records and daily history stored for Applications that deploy to another cluster (`PRUNE_REMOTE_COST`). It can't be undone, and an Application that targets this cluster by its API server URL counts as remote; see [Limits and requirements](limits-and-requirements.md#only-this-cluster-is-measured). |
+| `costIntelligence.unownedPodLabels` | `[]` | Labels that charge pods with no controller (CI job pods, Airflow's executor pods) to the Application deployed in their namespace (`UNOWNED_POD_LABELS`): `<label>=<value>`, or `<label>` for any value. The service's own default, `project.runner.gitlab.com/name`, applies when empty. See [Pods without a controller](how-costs-are-measured.md#pods-without-a-controller). |
+| `costIntelligence.unmanagedGroupLabels` | `[team, project.runner.gitlab.com/name]` | Pod labels whose values group pods in the lists (`UNMANAGED_GROUP_LABELS`). Presentation only. `[]` turns grouping off. |
+| `costIntelligence.ownerLabels` | `[]` | Extra pod labels naming the custom resource that owns a pod (`OWNER_LABELS`), for operators that create their own StatefulSets: `<label>=<Kind>\|<Kind>`, or `<label>` for any custom resource. |
+| `costIntelligence.nonOwnerKinds` | `[]` | Extra kinds Argo CD lists that never own pods (`NON_OWNER_KINDS`). |
 | `costIntelligence.vpa.enabled` | `true` | Read VPA recommendations for rightsizing (`VPA_ENABLED`) and give the ClusterRole read access to `verticalpodautoscalers`. See [Optional: rightsizing](installation.md#optional-rightsizing). |
 | `costIntelligence.logLevel` | `info` | `debug` also logs each OpenCost request URL and response body, in the API and the exporter (`LOG_LEVEL`). These name every namespace and its cost; turn it on only while troubleshooting. |
 | `costIntelligence.database.maxOpenConns` / `maxIdleConns` | `25` / `5` | Connection pool size per replica. Keep replicas times `maxOpenConns` below PostgreSQL's `max_connections`. |
@@ -70,6 +74,14 @@ The chart can't keep the PVC on uninstall, and it has no switch to run without o
 | `costIntelligence.image.repository` / `.tag` / `.pullPolicy` | `ghcr.io/octopusdeploy/cost-intelligence-argocd` / chart `appVersion` / `IfNotPresent` | The backend image, which the exporter runs too. Set `tag` to pin a release. |
 | `costIntelligence.resources` | 100m / 128Mi requested, 500m / 512Mi limit | |
 | `openCost.timeout` | `10s` | How long to wait for OpenCost. |
+| `openCost.provider` | `opencost` | `kubecost` reads Kubecost 3.1 instead (experimental). `openCost.baseURL` then ends in `/model` through Kubecost's cost-analyzer service, and has no suffix when it is the aggregator service itself (for example `http://kubecost-aggregator.kubecost:9004`). |
+| `openCost.kubecostClusterID` | empty | Kubecost only, and required there: this cluster's name in Kubecost. An aggregator answers for every cluster, so every query is limited to this one. |
+| `openCost.kubecostClusters` | `[]` | Kubecost only: the other clusters Argo CD deploys to, as `id`, `server` and `name`, rendered into a ConfigMap (`KUBECOST_CLUSTER_MAP_FILE`). |
+| `openCost.discoverClusters` | `true` | Kubecost only: measure an Argo CD cluster registered under the name Kubecost uses for it without a map entry (`KUBECOST_DISCOVER_CLUSTERS`). |
+| `openCost.eksOptimized` | `false` | Kubecost only: for the EKS-optimized Kubecost, which keeps 15 days (`KUBECOST_EKS_OPTIMIZED`). |
+| `openCost.shareTenancyCosts` | `false` | Kubecost only: spread Kubecost's tenancy costs over the applications and count that share in each cost (`KUBECOST_SHARE_TENANCY_COSTS`). |
+| `openCost.shareNamespaces` | `[]` | Kubecost only: namespaces, for example `[kube-system]`, whose cost in the same cluster is spread over that cluster's applications, in proportion to their cost, and counted in each cost (`KUBECOST_SHARE_NAMESPACES`). Computed by this service, because Kubecost would pool the namespace of every cluster. A shared namespace is not measured itself. |
+| `openCost.apiKey.existingSecret` / `.key` / `.header` | empty / `api-key` / `Authorization` | Kubecost only: the Secret holding the API key of a protected aggregator, and the header that carries it. |
 
 ### Argo CD integration and UI
 
@@ -207,6 +219,15 @@ The chart sets these variables from its values, so you only need them when you r
 | `DB_MAX_OPEN_CONNS` / `DB_MAX_IDLE_CONNS` | `25` / `5` | Connection pool size of each process. |
 | `OPENCOST_BASE_URL` | `http://opencost:9003` | OpenCost API endpoint, `http` or `https`. The chart's default is `http://opencost.opencost:9003`. |
 | `OPENCOST_TIMEOUT` | `10s` | How long to wait for each OpenCost request. |
+| `COST_PROVIDER` | `opencost` | `opencost` or `kubecost`. Kubecost support is experimental; features Kubecost has no equivalent for show as unavailable. |
+| `KUBECOST_CLUSTER_ID` | | This cluster's name in Kubecost. Required with `COST_PROVIDER=kubecost`. |
+| `KUBECOST_CLUSTER_MAP_FILE` | | Path of a JSON file mapping the other clusters Argo CD deploys to onto their names in Kubecost: `{"clusters":[{"id":"eks-prod-eu","server":"https://...","name":"prod-eu"}]}`. Each entry needs an `id` and a `server`, a `name` or both. An Application deploying to a mapped cluster is measured in it; to any other remote cluster, it is not measured. The Helm chart renders it from `openCost.kubecostClusters`. |
+| `KUBECOST_DISCOVER_CLUSTERS` | `true` | An Argo CD cluster registered under the name Kubecost itself uses for it (ignoring case) is measured without an entry in the cluster map. The service reads Kubecost's cluster names for this, again every 10 minutes. A name that differs needs an entry. |
+| `KUBECOST_API_KEY` | | API key of a protected Kubecost aggregator, sent with every request. The chart reads it from a Secret (`openCost.apiKey.existingSecret`). |
+| `KUBECOST_API_KEY_HEADER` | `Authorization` | Header carrying the key: sent as `Bearer <key>` for `Authorization`, as the key itself for any other header (for example `X-Api-Key`). |
+| `KUBECOST_EKS_OPTIMIZED` | `false` | For the EKS-optimized Kubecost, which keeps 15 days. The daily history is read in windows of at most 15 days, never further back than 15 days; what is already stored is kept. The UI draws ranges longer than about three months by week instead of by month. |
+| `KUBECOST_SHARE_TENANCY_COSTS` | `false` | Kubecost only: spread Kubecost's tenancy costs over the applications, in proportion to their cost, and count that share in each cost. |
+| `KUBECOST_SHARE_NAMESPACES` | | Kubecost only: comma-separated namespaces (for example `kube-system`) whose cost in the same cluster is spread over that cluster's applications, in proportion to their cost, and counted in each cost. Computed by this service (one extra cluster-wide query per measurement), because Kubecost would pool the namespace of every cluster. A shared namespace is not measured itself. |
 | `CLUSTER_SCOPE_APP` | empty | The Argo CD Application (`<namespace>:<name>`) whose viewers may see cluster-wide cost data. Empty finds one and `off` turns it off; see [Choose your settings](installation.md#choose-your-settings). |
 | `CLUSTER_ACCESS_APP` | empty | The fallback Application (`<namespace>:<name>`) when none installed the service; see [Authorization](architecture.md#authorization). |
 | `POD_NAMESPACE` / `DEPLOYMENT_NAME` | empty | The service's own Deployment, whose tracking annotation names the Application that installed it. |
@@ -214,6 +235,10 @@ The chart sets these variables from its values, so you only need them when you r
 | `DAILY_HISTORY_DAYS` | `400` | How many days of each application's daily cost to keep; `0` turns recording off. |
 | `BACKFILL_CONCURRENCY` | `4` | How many namespaces to measure at once when the service starts; `0` turns it off. See [Measuring at install](architecture.md#when-the-service-starts). |
 | `PRUNE_REMOTE_COST` | `false` | Delete stored cost for Applications that deploy to another cluster, which can't be undone; see [Limits and requirements](limits-and-requirements.md#only-this-cluster-is-measured). |
+| `UNMANAGED_GROUP_LABELS` | `team,project.runner.gitlab.com/name` | Pod labels whose values group pods in the namespace view and in an application's own pod list, so CI job pods (for example GitLab Runner's) read per team and project instead of as thousands of pods. A group is named by the values present, joined by ` / `. Presentation only: it never assigns cost to an application (that is `UNOWNED_POD_LABELS`). Empty turns it off. Helm: `costIntelligence.unmanagedGroupLabels` (a list). |
+| `OWNER_LABELS` | empty | Extra pod labels naming the custom resource that owns a pod, for operators that create their own StatefulSets: comma-separated `<label>=<Kind>\|<Kind>`, or `<label>` for any custom resource. Helm: `costIntelligence.ownerLabels` (a list). |
+| `NON_OWNER_KINDS` | empty | Extra kinds Argo CD lists that never own pods, comma-separated. Helm: `costIntelligence.nonOwnerKinds` (a list). |
+| `UNOWNED_POD_LABELS` | `project.runner.gitlab.com/name` | Labels that attribute pods with no controller (bare pods, such as Airflow's Kubernetes executor) to the Application deployed in their namespace: comma-separated `<label>=<value>`, or `<label>` for any value. Helm: `costIntelligence.unownedPodLabels` (a list). |
 | `VPA_ENABLED` | `true` | Read Vertical Pod Autoscaler recommendations for rightsizing; see [Optional: rightsizing](installation.md#optional-rightsizing). |
 | `LOG_LEVEL` | `info` | `info` or `debug`, in any case. `debug` also logs each OpenCost request URL and response body, which name every namespace and its cost. |
 

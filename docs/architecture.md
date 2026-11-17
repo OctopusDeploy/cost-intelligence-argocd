@@ -87,6 +87,14 @@ Application views show the application's share and namespace views show the name
 
 An application is identified by its namespace together with its name. With apps in any namespace enabled, `team-a/web` and `team-b/web` are two different applications.
 
+### Every pod and volume is counted once
+
+An application's share is the pods its listed workloads own, plus what no listed workload owns but can be attributed to it: pods of an operator's generated workloads (found by the pod's owner labels, `OWNER_LABELS`), and bare pods carrying one of `UNOWNED_POD_LABELS`, such as GitLab Runner's job pods. Each pod goes to one application, so applications sharing a namespace never add up to more than the namespace.
+
+Volumes follow the same rule. OpenCost and Kubecost list the claimed volumes no pod mounts as one more pod of the namespace, with a cost per volume. An application owns the volumes whose claims it lists, found by reading the volume claims from the cost backend (once for a while, cached); a claim is matched by its name, and only when no other claim in the cluster has that name. When exactly one Application deploys to the namespace (counting those that deploy there by default or have a workload in it, in the measured cluster), it owns every unmounted volume, listed or not. With several, the rest stays in the namespace's cost, since there is no way to tell whose it is. If the Application list or the claims can't be read, the volumes stay in the namespace's cost. The sync hook, the startup backfill and the exporter apply the same rule.
+
+Grouping pods by label (`UNMANAGED_GROUP_LABELS`) only changes how they are listed.
+
 ### Unknown is not zero
 
 When OpenCost hasn't measured a namespace yet, its cost is unknown, which is not the same as $0. The service stores nothing for it, because a stored $0 would show up on the tab as if it were a real figure.

@@ -4,6 +4,32 @@ All notable changes to this project are listed here. The format follows [Keep a 
 
 ## [Unreleased]
 
+### Added
+
+- Experimental support for Kubecost 3.1 with its aggregator as the cost backend, next to OpenCost (`COST_PROVIDER=kubecost`, Helm `openCost.provider`). Set `openCost.baseURL` to Kubecost's `/model` endpoint. `KUBECOST_CLUSTER_ID` (Helm `openCost.kubecostClusterID`) names this cluster in Kubecost and is required, because an aggregator answers for every cluster it knows. OpenCost is unchanged and stays the default.
+- Applications that deploy to other clusters can be measured with Kubecost. `KUBECOST_CLUSTER_MAP_FILE` (Helm `openCost.kubecostClusters`, rendered into a ConfigMap) maps an Argo CD destination, by server URL or registered name, to its cluster in Kubecost. The Cost Intelligence tab, the per-application views (daily cost, rightsizing, orphaned pods) and the waste ranking follow the map; a destination that is not mapped is still not measured. The same cluster registered in Argo CD under two names, for example `in-cluster` and `prod`, needs one entry for the second name.
+- With several clusters in the cluster map, the Namespaces, Idle spend and Chargeback pages have a cluster picker (`?costCluster=`); each reads that cluster's costs. The cluster cost says it is projected from the last 24 hours onto 30 days. With Kubecost, pricing is no longer checked through an endpoint Kubecost does not have, which showed as "Unknown, status 404".
+- An Argo CD cluster registered under the name Kubecost uses for it needs no cluster map entry: the service reads Kubecost's cluster names (`KUBECOST_DISCOVER_CLUSTERS`, Helm `openCost.discoverClusters`, on by default). For one that is not matched, the Cost Intelligence tab lists the names Kubecost knows.
+- A protected Kubecost aggregator can be queried with an API key read from a Secret (`KUBECOST_API_KEY`, `KUBECOST_API_KEY_HEADER`; Helm `openCost.apiKey`).
+- `KUBECOST_EKS_OPTIMIZED` (Helm `openCost.eksOptimized`) for the EKS-optimized Kubecost, which keeps 15 days: the daily history is read in windows that fit, history already stored is kept, and the UI draws ranges longer than about three months by week instead of by month.
+- Kubecost can spread costs no application owns over the applications: `KUBECOST_SHARE_TENANCY_COSTS` (Helm `openCost.shareTenancyCosts`) for its tenancy costs and `KUBECOST_SHARE_NAMESPACES` (Helm `openCost.shareNamespaces`) for the cost of named namespaces such as `kube-system`, spread within each namespace's own cluster (Kubecost itself would pool it across all clusters). Both are off by default and count in the namespace and application costs and the daily history, not in the exporter's per-resource gauges. The cost breakdown lists it as its own "Shared cost" row, named by source (for example "Namespace kube-system"), with a note that it is not the application's own usage.
+
+- With several clusters, the cluster-wide page opens on all of them: the total is all clusters' monthly cost, each namespace names its clusters, and the cluster picker filters the namespaces to one. The Idle spend ranking and its namespace list follow the picked cluster; Chargeback still reads one cluster at a time, and says so.
+- The application's monthly cost (Kubernetes plus cloud estimate) shows in Argo CD's status panel, next to Last Sync. The idle part is already inside the Kubernetes cost, so it is shown as detail and not added. It is hidden for an application on a cluster that is not measured.
+- Pods of operator-generated workloads are attributed to the custom resource Argo CD lists, by the pod's labels: a list of built-in owner labels (ClickHouse, CloudNativePG, Strimzi, Elastic, OpenTelemetry operator, the `app`/`app.kubernetes.io/*`/`release` labels) and `OWNER_LABELS` (Helm `costIntelligence.ownerLabels`) for others. Pods of any resource kind are matched, not an allowlist; `NON_OWNER_KINDS` (`costIntelligence.nonOwnerKinds`) names kinds that never own pods.
+- Pods with no controller (bare pods, such as GitLab Runner's CI job pods or Airflow's executor pods) are charged to the Application deployed in their namespace when they carry one of `UNOWNED_POD_LABELS` (`costIntelligence.unownedPodLabels`). It defaults to `project.runner.gitlab.com/name`, so a runner's job pods count in the runner's application. Each pod is counted once.
+- `UNMANAGED_GROUP_LABELS` (`costIntelligence.unmanagedGroupLabels`, default `team` and `project.runner.gitlab.com/name`) groups pods in the namespace view and in an application's pod list, so CI job pods read per team and project. Presentation only.
+- Volumes: claimed volumes no pod mounts are charged to the application that lists their PersistentVolumeClaim, and, when exactly one Application deploys to the namespace, every unmounted volume there is its. With several, the rest stays in the namespace's cost.
+- The Namespaces page lists the applications of the picked cluster only, not those of other clusters.
+
+### Fixed
+
+- The pods of a CloudNativePG `Cluster` are counted in the application that declares it. Argo CD lists the Cluster, which owns its pods directly, and it was not one of the kinds whose pods make up an application's cost.
+- The cluster picked on the cluster-wide page was ignored by the namespace list, the idle spend ranking and the other cluster-wide reads, because the page and those reads used two separate API clients. They now share one.
+- With Kubecost, which reports pods without a controller, an application owned none of its pods: its cost view showed 0 controllers and 0 pods and the namespace page listed them as unmanaged. A pod with no reported controller is now matched to its Deployment, Rollout, StatefulSet, DaemonSet or Job by the shape of its name, and a Deployment also owns its ReplicaSets.
+- The `__idle__` and `__unmounted__` entries are no longer listed as pods.
+- An Argo CD cluster name is matched to the cluster map ignoring case, and a refused read of the service's cluster list is retried instead of making every application look remote until the page reloads. The "Deploys to another cluster" panel now says which clusters the service's map lists.
+
 ## [0.2.0] - 2026-11-05
 
 ### Changed

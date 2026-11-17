@@ -20,12 +20,16 @@ spec:
       component: exporter
   template:
     metadata:
-      {{- if or .Values.commonAnnotations .Values.metrics.podAnnotations }}
+      {{- if or .Values.commonAnnotations .Values.metrics.podAnnotations (include "cost-intelligence-argocd.clusterMap.enabled" .) }}
       annotations:
         {{- with .Values.commonAnnotations }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
         {{- include "cost-intelligence-argocd.metrics.scrapeAnnotations" . | nindent 8 }}
+        {{- if include "cost-intelligence-argocd.clusterMap.enabled" . }}
+        # Restart the pods when the cluster map changes: it is read at startup.
+        checksum/cluster-map: {{ include "cost-intelligence-argocd.clusterMap.json" . | sha256sum }}
+        {{- end }}
       {{- end }}
       labels:
         {{- include "cost-intelligence-argocd.selectorLabels" . | nindent 8 }}
@@ -54,6 +58,18 @@ spec:
           value: {{ .Values.metrics.exporter.interval | quote }}
         - name: LOG_LEVEL
           value: {{ .Values.costIntelligence.logLevel | quote }}
+        {{- with .Values.costIntelligence.ownerLabels }}
+        - name: OWNER_LABELS
+          value: {{ join "," . | quote }}
+        {{- end }}
+        {{- with .Values.costIntelligence.nonOwnerKinds }}
+        - name: NON_OWNER_KINDS
+          value: {{ join "," . | quote }}
+        {{- end }}
+        {{- with .Values.costIntelligence.unownedPodLabels }}
+        - name: UNOWNED_POD_LABELS
+          value: {{ join "," . | quote }}
+        {{- end }}
         # PostgreSQL, for the cloud estimates CI pushes.
         - name: DB_HOST
           value: {{ include "cost-intelligence-argocd.postgres.host" . | quote }}
@@ -80,6 +96,41 @@ spec:
               key: opencost-base-url
         - name: OPENCOST_TIMEOUT
           value: {{ .Values.openCost.timeout | quote }}
+        - name: COST_PROVIDER
+          value: {{ .Values.openCost.provider | default "opencost" | quote }}
+        {{- if eq (.Values.openCost.provider | default "opencost") "kubecost" }}
+        - name: KUBECOST_CLUSTER_ID
+          value: {{ required "openCost.kubecostClusterID is required when openCost.provider is kubecost: Kubecost answers for every cluster it knows" .Values.openCost.kubecostClusterID | quote }}
+        {{- end }}
+        {{- if include "cost-intelligence-argocd.clusterMap.enabled" . }}
+        - name: KUBECOST_CLUSTER_MAP_FILE
+          value: /etc/cost-intelligence/clusters.json
+        {{- end }}
+        {{- if not .Values.openCost.discoverClusters }}
+        - name: KUBECOST_DISCOVER_CLUSTERS
+          value: "false"
+        {{- end }}
+        {{- if .Values.openCost.eksOptimized }}
+        - name: KUBECOST_EKS_OPTIMIZED
+          value: "true"
+        {{- end }}
+        {{- if .Values.openCost.shareTenancyCosts }}
+        - name: KUBECOST_SHARE_TENANCY_COSTS
+          value: "true"
+        {{- end }}
+        {{- with .Values.openCost.shareNamespaces }}
+        - name: KUBECOST_SHARE_NAMESPACES
+          value: {{ join "," . | quote }}
+        {{- end }}
+        {{- with .Values.openCost.apiKey.existingSecret }}
+        - name: KUBECOST_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: {{ . | quote }}
+              key: {{ $.Values.openCost.apiKey.key | default "api-key" | quote }}
+        - name: KUBECOST_API_KEY_HEADER
+          value: {{ $.Values.openCost.apiKey.header | default "Authorization" | quote }}
+        {{- end }}
         {{- if .Values.security.containerSecurityContext }}
         securityContext:
           {{- toYaml .Values.security.containerSecurityContext | nindent 12 }}
@@ -109,6 +160,12 @@ spec:
             port: metrics
           periodSeconds: 5
           timeoutSeconds: 5
+        {{- if include "cost-intelligence-argocd.clusterMap.enabled" . }}
+        volumeMounts:
+        - name: cluster-map
+          mountPath: /etc/cost-intelligence
+          readOnly: true
+        {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
@@ -120,6 +177,12 @@ spec:
       {{- with .Values.tolerations }}
       tolerations:
         {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if include "cost-intelligence-argocd.clusterMap.enabled" . }}
+      volumes:
+      - name: cluster-map
+        configMap:
+          name: {{ include "cost-intelligence-argocd.fullname" . }}-clusters
       {{- end }}
 ---
 apiVersion: v1

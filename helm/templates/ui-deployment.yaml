@@ -20,6 +20,7 @@ spec:
         {{- include "cost-intelligence-argocd.selectorLabels" . | nindent 8 }}
         component: ui
     spec:
+      serviceAccountName: {{ include "cost-intelligence-argocd.serviceAccountName" . }}
       {{- if .Values.security.podSecurityContext }}
       securityContext:
         {{- toYaml .Values.security.podSecurityContext | nindent 8 }}
