@@ -120,6 +120,10 @@ spec:
         - name: KUBECOST_EKS_OPTIMIZED
           value: "true"
         {{- end }}
+        {{- with .Values.openCost.cloudCostURL }}
+        - name: KUBECOST_CLOUD_COST_URL
+          value: {{ . | quote }}
+        {{- end }}
         {{- if .Values.openCost.shareTenancyCosts }}
         - name: KUBECOST_SHARE_TENANCY_COSTS
           value: "true"

@@ -345,6 +345,10 @@
           "type": "boolean",
           "description": "Kubecost only: the EKS-optimized Kubecost keeps 15 days (KUBECOST_EKS_OPTIMIZED)."
         },
+        "cloudCostURL": {
+          "type": "string",
+          "description": "Kubecost only: base URL of the service that answers /cloudCost/status, for the pricing source, for example the cloud-cost service (KUBECOST_CLOUD_COST_URL)."
+        },
         "shareTenancyCosts": {
           "type": "boolean",
           "description": "Kubecost only: spread tenancy costs over the applications and count them in each cost (KUBECOST_SHARE_TENANCY_COSTS)."

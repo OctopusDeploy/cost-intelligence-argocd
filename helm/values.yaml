@@ -230,6 +230,11 @@ openCost:
   # Kubecost only: the EKS-optimized Kubecost keeps 15 days. History is then read in windows of at most
   # 15 days, and the UI draws long ranges by week, never by month.
   eksOptimized: false
+  # Kubecost only: the base URL of the service that answers /cloudCost/status, which tells whether a
+  # cloud billing integration (for example the AWS CUR) prices the cost, for the Pricing card. The
+  # aggregator doesn't serve it; Kubecost's cloud-cost service does, without a /model prefix, for
+  # example http://kubecost-cloud-cost.kubecost:9005. Empty uses baseURL.
+  cloudCostURL: ""
   # Kubecost only: spread Kubecost's tenancy costs (cluster-level costs no namespace owns) over the
   # applications, in proportion to their cost, and count that share in what each costs. Off by default:
   # an application then costs what its own pods, volumes and network cost.

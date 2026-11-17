@@ -37,6 +37,9 @@ type Client struct {
 	shareTenancy    bool
 	shareNamespaces []string
 
+	// cloudCostURL is where Kubecost's /cloudCost/status is read; empty uses baseURL.
+	cloudCostURL string
+
 	// volumeMu guards volumeCache: the claims of a cluster's volumes, by cluster, read once for a while.
 	volumeMu    sync.Mutex
 	volumeCache map[string]volumeClaims
@@ -59,6 +62,13 @@ func WithKubecost(clusterID string) ClientOption {
 		c.kubecost = true
 		c.clusterID = clusterID
 	}
+}
+
+// WithCloudCostURL sets the base URL of the Kubecost service that serves /cloudCost/status. The
+// aggregator doesn't (it answers 403 or 404), so with one as the client's base URL the pricing source
+// is read here; for example http://kubecost-cloud-cost.kubecost:9005. Empty uses the base URL.
+func WithCloudCostURL(u string) ClientOption {
+	return func(c *Client) { c.cloudCostURL = strings.TrimRight(strings.TrimSpace(u), "/") }
 }
 
 // WithSharedCosts has a Kubecost query spread costs no application owns over the allocations it
@@ -1786,8 +1796,7 @@ func parseOpenCostResponse(resp AllocationResponse, startTime, endTime time.Time
 // advisory, not load-bearing.
 func (c *Client) GetDataQuality(ctx context.Context) (*models.DataQuality, error) {
 	if c.kubecost {
-		// Kubecost has no pricingSourceStatus; asking would only log a 404 for every viewer's refresh.
-		return &models.DataQuality{PricingSource: "unknown", Message: "Kubecost does not report its pricing source through its API"}, nil
+		return c.kubecostDataQuality(ctx), nil
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/pricingSourceStatus", http.NoBody)
 	if err != nil {
@@ -1837,6 +1846,51 @@ func classifyPricingSource(msg string) string {
 	return "real"
 }
 
+// kubecostDataQuality reads the pricing source from Kubecost's cloud integrations
+// (/cloudCost/status): a cloud billing integration (for example the AWS CUR) that is active and valid
+// means prices come from the bill ("real"); integrations that exist but don't work, or none, mean
+// on-demand list prices ("estimated" or, when Kubecost can't be asked, "unknown"). Kubecost has no
+// pricingSourceStatus like OpenCost's.
+func (c *Client) kubecostDataQuality(ctx context.Context) *models.DataQuality {
+	unknown := func(msg string) *models.DataQuality {
+		return &models.DataQuality{PricingSource: "unknown", Message: msg}
+	}
+	base := c.cloudCostURL
+	if base == "" {
+		base = c.baseURL
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/cloudCost/status", http.NoBody)
+	if err != nil {
+		return unknown("failed to build request")
+	}
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return unknown("Kubecost unreachable")
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return unknown(fmt.Sprintf("Kubecost cloud integration status unavailable (status %d); set KUBECOST_CLOUD_COST_URL to the service that serves /cloudCost/status", resp.StatusCode))
+	}
+	var status struct {
+		Data []struct {
+			Provider string `json:"provider"`
+			Active   bool   `json:"active"`
+			Valid    bool   `json:"valid"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&status); err != nil {
+		return unknown("unreadable response")
+	}
+	if len(status.Data) == 0 {
+		return &models.DataQuality{PricingSource: "estimated", Message: "No cloud billing integration is configured in Kubecost; on-demand list prices are used"}
+	}
+	for _, integration := range status.Data {
+		if integration.Active && integration.Valid {
+			return &models.DataQuality{PricingSource: "real", Message: integration.Provider + " billing integration is active in Kubecost"}
+		}
+	}
+	return &models.DataQuality{PricingSource: "estimated", Message: "No Kubecost cloud billing integration is active and valid; on-demand list prices are used"}
+}
 // AssetsResponse mirrors the top-level shape of GET /assets: one set of assets for the
 // window, keyed by their properties joined with "/". OpenCost ignores `aggregate` here,
 // so an asset is found by its type, not by its key.

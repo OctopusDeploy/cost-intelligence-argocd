@@ -249,19 +249,64 @@ type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
-func TestGetDataQuality_KubecostHasNoPricingSourceEndpoint(t *testing.T) {
+func TestGetDataQuality_KubecostReadsItsCloudIntegrations(t *testing.T) {
 	t.Parallel()
 
-	called := false
-	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { called = true }))
-	t.Cleanup(srv.Close)
+	tests := []struct {
+		name   string
+		status int
+		body   string
+		want   string
+	}{
+		{"active and valid", http.StatusOK, `{"code":200,"data":[{"provider":"AWS","active":true,"valid":true}]}`, "real"},
+		{"one of several works", http.StatusOK, `{"data":[{"provider":"AWS","active":true,"valid":false},{"provider":"AWS","active":true,"valid":true}]}`, "real"},
+		{"none works", http.StatusOK, `{"data":[{"provider":"AWS","active":true,"valid":false}]}`, "estimated"},
+		{"none configured", http.StatusOK, `{"data":[]}`, "estimated"},
+		{"endpoint missing", http.StatusNotFound, `not found`, "unknown"},
+		{"unreadable", http.StatusOK, `<html>`, "unknown"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 
-	quality, err := NewClient(srv.URL, 5*time.Second, nil, WithKubecost("eks-prod-1")).GetDataQuality(context.Background())
+			var path string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				path = r.URL.Path
+				w.WriteHeader(tt.status)
+				_, _ = w.Write([]byte(tt.body))
+			}))
+			t.Cleanup(srv.Close)
 
+			quality, err := NewClient(srv.URL, 5*time.Second, nil, WithKubecost("eks-prod-1")).GetDataQuality(context.Background())
+
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, quality.PricingSource)
+			assert.Equal(t, "/cloudCost/status", path)
+		})
+	}
+}
+
+func TestGetDataQuality_KubecostAggregatorNeedsTheCloudCostURL(t *testing.T) {
+	t.Parallel()
+
+	var path string
+	analyzer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path = r.URL.Path
+		_, _ = w.Write([]byte(`{"data":[{"provider":"AWS","active":true,"valid":true}]}`))
+	}))
+	t.Cleanup(analyzer.Close)
+	aggregator := httptest.NewServer(http.NotFoundHandler())
+	t.Cleanup(aggregator.Close)
+
+	without, err := NewClient(aggregator.URL, 5*time.Second, nil, WithKubecost("c")).GetDataQuality(context.Background())
 	require.NoError(t, err)
-	assert.Equal(t, "unknown", quality.PricingSource)
-	assert.NotContains(t, quality.Message, "404")
-	assert.False(t, called, "nothing to ask Kubecost")
+	assert.Equal(t, "unknown", without.PricingSource)
+	assert.Contains(t, without.Message, "KUBECOST_CLOUD_COST_URL")
+
+	with, err := NewClient(aggregator.URL, 5*time.Second, nil, WithKubecost("c"), WithCloudCostURL(analyzer.URL+"/")).GetDataQuality(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, "real", with.PricingSource)
+	assert.Equal(t, "/cloudCost/status", path)
 }
 
 func TestListClusters_NamesEveryClusterKubecostKnows(t *testing.T) {

@@ -38,6 +38,11 @@ type Config struct {
 	// KubecostEKSOptimized is for the EKS-optimized Kubecost, which keeps only EKSOptimizedRetentionDays
 	// days: history is read in windows that fit, and the UI aggregates by week, never by month.
 	KubecostEKSOptimized bool `envconfig:"KUBECOST_EKS_OPTIMIZED"`
+	// KubecostCloudCostURL is the base URL of the Kubecost service that answers /cloudCost/status, which
+	// says whether a cloud billing integration (for example the AWS CUR) prices the cost. The aggregator
+	// doesn't serve it: use the cloud-cost service, for example http://kubecost-cloud-cost.kubecost:9005.
+	// Empty uses OPENCOST_BASE_URL.
+	KubecostCloudCostURL string `envconfig:"KUBECOST_CLOUD_COST_URL"`
 	// KubecostShareTenancyCosts spreads Kubecost's tenancy costs (cluster-level costs no namespace
 	// owns) over the allocations, and counts that share in each cost. Off by default.
 	KubecostShareTenancyCosts bool `envconfig:"KUBECOST_SHARE_TENANCY_COSTS"`
