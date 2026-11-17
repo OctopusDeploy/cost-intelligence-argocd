@@ -1,6 +1,19 @@
 // API client for Cost Intelligence service
 
 import type { DayRange } from './ranges';
+import type { MeasuredCluster } from './destination';
+
+// The cluster part of the service's /config.
+interface ClusterConfig {
+  measuredClusters?: MeasuredCluster[];
+  knownClusters?: string[];
+}
+
+// A cluster the cluster-wide pages can show, by its name in the cost backend.
+export interface ClusterChoice {
+  id: string;
+  local?: boolean;
+}
 
 // Calls go through ArgoCD's extension proxy (/extensions/cost-intel → backend service).
 // This works from any browser context without exposing the backend externally.
@@ -29,7 +42,12 @@ export interface PodCost {
   controllerKind: string;
   cpuCost: number;
   ramCost: number;
+  // sharedCost is the part of totalCost that is shared cost spread over the pod, not its own usage.
+  sharedCost?: number;
   totalCost: number;
+  // group names the team or project the pod belongs to, from the labels the backend is configured
+  // to group unmanaged pods by. Presentation only.
+  group?: string;
 }
 
 export interface CostBreakdown {
@@ -46,6 +64,8 @@ export interface CostBreakdown {
   totalCost: number;
   carbonCost?: number;
   sharedCost?: number;
+  // sharedCostIncluded says sharedCost is part of totalCost, rather than only reported beside it.
+  sharedCostIncluded?: boolean;
   sharedCostBreakdown?: Record<string, number>;
 }
 
@@ -95,6 +115,8 @@ export interface CostData {
   resources?: ResourceCost[];
   efficiency?: EfficiencyMetrics;
   pods?: PodCost[];
+  // ownedPods are the pods the application owns by the backend's rules, sent on the namespace routes.
+  ownedPods?: Array<{ name: string; controller?: string; controllerKind?: string }>;
   anomaly?: CostAnomaly;
   cloudEstimate?: CloudServiceEstimate;
 }
@@ -137,6 +159,8 @@ export interface DailyCostData {
   namespace: string;
   days: number;
   dailyCosts: DailyCost[];
+  // "week" when the service's cost backend keeps too little history for monthly aggregates.
+  maxGranularity?: 'week';
 }
 
 export interface AppContext {
@@ -153,6 +177,9 @@ export interface NamespaceSummary {
   idleCost: number | null;
   appCount: number;
   measuredAt: string;
+  // clusters are the clusters the applications deploying to the namespace run on, in the cost backend's
+  // names. Absent when the backend measures a single cluster.
+  clusters?: string[];
 }
 
 // NamespaceCostSummary is the average cost of a namespace over a number of days.
@@ -319,6 +346,48 @@ class CostIntelligenceAPI {
   // session-cookie-authenticated API and cache the result for the session.
   // The specific app doesn't matter — RBAC only checks that the user can see it — so these
   // headers only reach endpoints that reveal nothing about a particular application.
+  // The cluster the cluster-wide pages show, empty for the one the service runs in.
+  private selectedCluster = '';
+  private clustersRequest: Promise<ClusterChoice[]> | null = null;
+
+  // setCluster picks the cluster the cluster-wide calls read: one of getClusters, or empty for this one.
+  setCluster(id: string): void {
+    this.selectedCluster = id;
+  }
+
+  // The cluster the namespaces and the ranking are filtered to, by name, empty for all of them. Unlike
+  // selectedCluster it names this cluster too, as the stored costs are not read from any one.
+  private filteredCluster = '';
+
+  setClusterFilter(id: string): void {
+    this.filteredCluster = id;
+  }
+
+  // scoped adds the selected cluster to the URL of a cluster-wide call.
+  private scoped(url: string): string {
+    if (!this.selectedCluster) return url;
+    return `${url}${url.includes('?') ? '&' : '?'}cluster=${encodeURIComponent(this.selectedCluster)}`;
+  }
+
+  // getClusters lists the clusters the cluster-wide pages can show, this one first. Empty when there is
+  // nothing to choose: the cost backend measures only this cluster, or a failure answers none.
+  async getClusters(): Promise<ClusterChoice[]> {
+    if (!this.clustersRequest) {
+      this.clustersRequest = (async () => {
+        const response = await fetch(`${this.baseUrl}/api/cost-analysis/config`, { headers: await this.anyAppHeaders() });
+        if (!response.ok) return [];
+        const { clusters } = (await response.json()) as { clusters?: ClusterChoice[] };
+        return clusters ?? [];
+      })().catch(() => {
+        this.clustersRequest = null;
+        return [];
+      });
+    }
+    return this.clustersRequest;
+  }
+
+  private clusterConfigRequest: Promise<ClusterConfig> | null = null;
+
   private async anyAppHeaders(): Promise<HeadersInit> {
     if (this.cachedProxyAppRef === undefined) {
       try {
@@ -446,7 +515,7 @@ class CostIntelligenceAPI {
   async getNamespaceSummary(namespace: string, days: number = 30): Promise<NamespaceCostSummary | null> {
     try {
       const response = await fetch(
-        `${this.baseUrl}/api/cost-analysis/namespace/${encodeURIComponent(namespace)}/summary?days=${days}`,
+        this.scoped(`${this.baseUrl}/api/cost-analysis/namespace/${encodeURIComponent(namespace)}/summary?days=${days}`),
         { headers: await this.clusterHeaders() }
       );
 
@@ -462,6 +531,39 @@ class CostIntelligenceAPI {
       console.error('Failed to fetch namespace summary:', error);
       throw error;
     }
+  }
+
+  // getMeasuredClusters lists the other clusters whose applications the service measures (Kubecost
+  // with a cluster map). A failure answers none, as before the feature: the application then shows
+  // as deploying elsewhere.
+  async getMeasuredClusters(): Promise<MeasuredCluster[]> {
+    return (await this.clusterConfig()).measuredClusters ?? [];
+  }
+
+  // getKnownClusters lists the cluster names the cost backend has cost for (Kubecost), none when it
+  // cannot tell. They are what a cluster map entry's id can be.
+  async getKnownClusters(): Promise<string[]> {
+    return (await this.clusterConfig()).knownClusters ?? [];
+  }
+
+  // clusterConfig reads the cluster part of /config once. A failure answers nothing, as before the
+  // feature: the application then shows as deploying elsewhere.
+  private clusterConfig(): Promise<ClusterConfig> {
+    if (!this.clusterConfigRequest) {
+      this.clusterConfigRequest = (async () => {
+        const response = await fetch(`${this.baseUrl}/api/cost-analysis/config`, { headers: await this.anyAppHeaders() });
+        if (!response.ok) {
+          // Not kept: a refusal (or a proxy hiccup) must not make every application look remote until reload.
+          this.clusterConfigRequest = null;
+          return {};
+        }
+        return (await response.json()) as ClusterConfig;
+      })().catch(() => {
+        this.clusterConfigRequest = null;
+        return {};
+      });
+    }
+    return this.clusterConfigRequest;
   }
 
   // getDailyCosts fetches the last `window` days, or the UTC days of a DayRange.
@@ -494,7 +596,7 @@ class CostIntelligenceAPI {
   async listNamespaces(): Promise<NamespaceSummary[]> {
     try {
       const response = await fetch(
-        `${this.baseUrl}/api/cost-analysis/namespaces`,
+        this.scoped(`${this.baseUrl}/api/cost-analysis/namespaces`),
         { headers: await this.clusterHeaders() }
       );
       if (!response.ok) {
@@ -511,7 +613,7 @@ class CostIntelligenceAPI {
   async getOrphanedPods(namespace: string): Promise<OrphanedPodsResponse> {
     try {
       const response = await fetch(
-        `${this.baseUrl}/api/cost-analysis/namespace/${encodeURIComponent(namespace)}/orphaned-pods`,
+        this.scoped(`${this.baseUrl}/api/cost-analysis/namespace/${encodeURIComponent(namespace)}/orphaned-pods`),
         { headers: await this.clusterHeaders() }
       );
       if (!response.ok) {
@@ -555,7 +657,7 @@ class CostIntelligenceAPI {
       const params = new URLSearchParams({ label: labelKey });
       if (namespace) params.set('namespace', namespace);
       const response = await fetch(
-        `${this.baseUrl}/api/cost-analysis/chargeback?${params}`,
+        this.scoped(`${this.baseUrl}/api/cost-analysis/chargeback?${params}`),
         { headers: await this.clusterHeaders() }
       );
       if (!response.ok) {
@@ -574,7 +676,7 @@ class CostIntelligenceAPI {
       const params = new URLSearchParams();
       if (namespace) params.set('namespace', namespace);
       const response = await fetch(
-        `${this.baseUrl}/api/cost-analysis/chargeback/labels?${params}`,
+        this.scoped(`${this.baseUrl}/api/cost-analysis/chargeback/labels?${params}`),
         { headers: await this.clusterHeaders() }
       );
       if (!response.ok) {
@@ -591,7 +693,7 @@ class CostIntelligenceAPI {
   async getClusterOverhead(): Promise<ClusterOverhead> {
     try {
       const response = await fetch(
-        `${this.baseUrl}/api/cost-analysis/cluster/overhead`,
+        this.scoped(`${this.baseUrl}/api/cost-analysis/cluster/overhead`),
         { headers: await this.clusterHeaders() }
       );
       if (!response.ok) {
@@ -606,7 +708,7 @@ class CostIntelligenceAPI {
 
   async getWasteRanking(): Promise<WasteRanking> {
     try {
-      const response = await fetch(`${this.baseUrl}/api/cost-analysis/waste`, { headers: await this.clusterHeaders() });
+      const response = await fetch(`${this.baseUrl}/api/cost-analysis/waste${this.filteredCluster ? `?cluster=${encodeURIComponent(this.filteredCluster)}` : ''}`, { headers: await this.clusterHeaders() });
       if (!response.ok) {
         // The service answers 503 with this error when it can't list the applications; a proxy in
         // front of it could answer 503 for its own reasons.
@@ -628,7 +730,7 @@ class CostIntelligenceAPI {
   async getNamespaceApps(namespace: string): Promise<CostData[]> {
     try {
       const response = await fetch(
-        `${this.baseUrl}/api/cost-analysis/namespace/${encodeURIComponent(namespace)}/apps`,
+        this.scoped(`${this.baseUrl}/api/cost-analysis/namespace/${encodeURIComponent(namespace)}/apps`),
         { headers: await this.clusterHeaders() }
       );
       if (!response.ok) {
@@ -668,9 +770,11 @@ class CostIntelligenceAPI {
   }
 }
 
-export default new CostIntelligenceAPI();
-
+// One instance for the default export and the fetch* helpers: the cluster picked on the page (setCluster,
+// setClusterFilter) lives on it, so two would have the helpers ignore the page's choice.
 const _api = new CostIntelligenceAPI();
+
+export default _api;
 
 export async function fetchNamespaces(): Promise<NamespaceSummary[]> {
   return _api.listNamespaces();

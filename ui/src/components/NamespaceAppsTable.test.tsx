@@ -16,6 +16,7 @@ const app = (namespace: string, controller: string): AppCost => ({
       pods: [],
       cpuCost: 1,
       ramCost: 1,
+      sharedCost: 0,
       totalCost: 2,
       share: 1,
     },
@@ -23,6 +24,7 @@ const app = (namespace: string, controller: string): AppCost => ({
   podCount: 0,
   cpuCost: 1,
   ramCost: 1,
+  sharedCost: 0,
   totalCost: 2,
   share: 0.5,
   measuredAt: null,
@@ -49,6 +51,7 @@ describe('NamespaceAppsTable', () => {
       pods: [],
       cpuCost: 0.0435,
       ramCost: 0.0435,
+      sharedCost: 0,
       totalCost: 0.087,
       share: 0.5,
     });
@@ -72,5 +75,13 @@ describe('NamespaceAppsTable', () => {
       ['$0.05', '$0.04', '$0.09'],
       ['$0.04', '$0.04', '$0.08'],
     ]);
+  });
+
+  it('lists the cost no pod accounts for, and nothing when there is none', () => {
+    const { queryByText, rerender } = render(<NamespaceAppsTable apps={[app('team-a', 'web')]} totalCost={2} unattributed={3.5} />);
+    expect(queryByText('Not attributed to a pod')).not.toBeNull();
+
+    rerender(<NamespaceAppsTable apps={[app('team-a', 'web')]} totalCost={2} unattributed={0.001} />);
+    expect(queryByText('Not attributed to a pod')).toBeNull();
   });
 });

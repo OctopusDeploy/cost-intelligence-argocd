@@ -5,9 +5,11 @@ import { formatMoney, formatPercent, roundColumns, roundParts } from '../utils/f
 import { NAME_COLUMN, SPACER_COLUMN } from '../utils/layout';
 import { ControllerGroup } from '../utils/podGroups';
 
-// Expand, controller, kind, pods, CPU, memory, total, share, then a spacer. The controller name
-// grows to 480px and the spacer takes any width beyond that (see NAME_COLUMN).
-const COLUMNS = `48px ${NAME_COLUMN} 112px 56px 104px 104px 104px 132px ${SPACER_COLUMN}`;
+// Expand, controller, kind, pods, CPU, memory, (shared,) total, share, then a spacer. The controller name
+// grows to 480px and the spacer takes any width beyond that (see NAME_COLUMN). The shared column is
+// there only when shared cost is counted in the totals.
+const columns = (shared: boolean) =>
+  `48px ${NAME_COLUMN} 112px 56px 104px 104px ${shared ? '104px ' : ''}104px 132px ${SPACER_COLUMN}`;
 const MIN_TABLE_WIDTH = '820px';
 
 const plural = (count: number, noun: string) => `${count} ${noun}${count === 1 ? '' : 's'}`;
@@ -23,6 +25,7 @@ export const ControllerCostTable: React.FC<Props> = ({ groups }) => {
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
   const total = groups.reduce((sum, group) => sum + group.totalCost, 0);
   const podCount = groups.reduce((sum, group) => sum + group.pods.length, 0);
+  const hasShared = groups.some(group => group.sharedCost > 0);
 
   const toggle = (key: string) =>
     setExpanded(current => {
@@ -33,7 +36,7 @@ export const ControllerCostTable: React.FC<Props> = ({ groups }) => {
 
   const row: React.CSSProperties = {
     display: 'grid',
-    gridTemplateColumns: COLUMNS,
+    gridTemplateColumns: columns(hasShared),
     alignItems: 'center',
     color: t.text,
     fontSize: '13px',
@@ -79,6 +82,11 @@ export const ControllerCostTable: React.FC<Props> = ({ groups }) => {
               <span role="columnheader" style={numeric}>
                 Memory
               </span>
+              {hasShared && (
+                <span role="columnheader" style={numeric} title="Cost shared across the cluster, not this controller's own usage">
+                  Shared
+                </span>
+              )}
               <span role="columnheader" style={numeric}>
                 Total
               </span>
@@ -93,7 +101,11 @@ export const ControllerCostTable: React.FC<Props> = ({ groups }) => {
             const groupId = `cost-intel-controller-${index}`;
             // Rounded so the cells beside each total add up to it, and the pods to their controller.
             const [groupTotal] = roundParts([group.totalCost]);
-            const [groupCpu, groupRam] = roundColumns([group.cpuCost, group.ramCost], group.totalCost, groupTotal);
+            const [groupCpu, groupRam, groupShared = 0] = roundColumns(
+              hasShared ? [group.cpuCost, group.ramCost, group.sharedCost] : [group.cpuCost, group.ramCost],
+              group.totalCost,
+              groupTotal
+            );
             const podTotals = roundParts(group.pods.map(pod => pod.totalCost), groupTotal);
             return (
               <div key={group.key} id={groupId} role="rowgroup" style={{ ...cardStyle(t), margin: '8px 0', overflow: 'hidden' }}>
@@ -141,6 +153,11 @@ export const ControllerCostTable: React.FC<Props> = ({ groups }) => {
                   <span role="cell" style={numeric}>
                     {formatMoney(groupRam)}
                   </span>
+                  {hasShared && (
+                    <span role="cell" style={numeric}>
+                      {formatMoney(groupShared)}
+                    </span>
+                  )}
                   <span role="cell" style={{ ...numeric, color: t.textStrong, fontWeight: 500 }}>
                     {formatMoney(groupTotal)}
                   </span>
@@ -152,7 +169,11 @@ export const ControllerCostTable: React.FC<Props> = ({ groups }) => {
                 {open &&
                   group.pods.map((pod, podIndex) => {
                     const podTotal = podTotals[podIndex];
-                    const [podCpu, podRam] = roundColumns([pod.cpuCost, pod.ramCost], pod.totalCost, podTotal);
+                    const [podCpu, podRam, podShared = 0] = roundColumns(
+                      hasShared ? [pod.cpuCost, pod.ramCost, pod.sharedCost ?? 0] : [pod.cpuCost, pod.ramCost],
+                      pod.totalCost,
+                      podTotal
+                    );
                     return (
                       <div
                         key={pod.name}
@@ -173,6 +194,11 @@ export const ControllerCostTable: React.FC<Props> = ({ groups }) => {
                         <span role="cell" style={numeric}>
                           {formatMoney(podRam)}
                         </span>
+                        {hasShared && (
+                          <span role="cell" style={numeric}>
+                            {formatMoney(podShared)}
+                          </span>
+                        )}
                         <span role="cell" style={numeric}>
                           {formatMoney(podTotal)}
                         </span>

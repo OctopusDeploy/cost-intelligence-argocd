@@ -8,10 +8,12 @@ interface Props {
   selected: string | null;
   onSelect: (namespace: string) => void;
   clusterTotal: number;
+  // showClusters names each namespace's clusters, when the list spans several.
+  showClusters?: boolean;
 }
 
 // NamespaceList lets the viewer pick a namespace, showing each one's cost and share of the cluster.
-export const NamespaceList: React.FC<Props> = ({ namespaces, selected, onSelect, clusterTotal }) => {
+export const NamespaceList: React.FC<Props> = ({ namespaces, selected, onSelect, clusterTotal, showClusters }) => {
   const t = useTokens();
 
   return (
@@ -67,8 +69,8 @@ export const NamespaceList: React.FC<Props> = ({ namespaces, selected, onSelect,
                   >
                     <span style={{ display: 'block', width: `${Math.min(share, 1) * 100}%`, height: '100%', backgroundColor: t.accent }} />
                   </span>
-                  <span style={{ minWidth: '84px', color: t.textMuted, fontSize: '12px', textAlign: 'right' }}>
-                    {formatPercent(share)} · {pluralize(ns.appCount, 'app')}
+                  <span style={{ minWidth: '84px', overflowWrap: 'anywhere', color: t.textMuted, fontSize: '12px', textAlign: 'right' }}>
+                    {formatPercent(share)} · {pluralize(ns.appCount, 'app')}{showClusters && ns.clusters?.length ? ` · ${ns.clusters.join(', ')}` : ''}
                   </span>
                 </span>
               </button>

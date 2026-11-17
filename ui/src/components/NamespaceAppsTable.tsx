@@ -7,9 +7,10 @@ import { formatMoney, formatRelativeTime, isStale, pluralize, roundColumns, roun
 import { NAME_COLUMN, SPACER_COLUMN } from '../utils/layout';
 import { AppCost } from '../utils/namespaceApps';
 
-// Expand, application, CPU, memory, total, share, measured, then a spacer. The application name
-// grows to 480px and the spacer takes any width beyond that (see NAME_COLUMN).
-const COLUMNS = `48px ${NAME_COLUMN} 104px 104px 116px 132px 140px ${SPACER_COLUMN}`;
+// Expand, application, CPU, memory, (shared,) total, share, measured, then a spacer. The application name
+// grows to 480px and the spacer takes any width beyond that (see NAME_COLUMN). The shared column is
+// there only when shared cost is counted in the totals.
+const columns = (shared: boolean) => `48px ${NAME_COLUMN} 104px 104px ${shared ? '104px ' : ''}116px 132px 140px ${SPACER_COLUMN}`;
 const MIN_TABLE_WIDTH = '844px';
 const TITLE_ID = 'cost-intel-namespace-apps-title';
 
@@ -22,13 +23,17 @@ const appLink = (app: AppCost) =>
 interface Props {
   apps: AppCost[];
   totalCost: number;
+  // unattributed is the part of the namespace's cost that no pod row accounts for, such as volumes
+  // no pod mounts. Shown as its own row when it is worth a cent or more.
+  unattributed?: number;
 }
 
 // NamespaceAppsTable lists a namespace's applications, each expandable to the controllers it manages.
 // Every pod appears under exactly one row.
-export const NamespaceAppsTable: React.FC<Props> = ({ apps, totalCost }) => {
+export const NamespaceAppsTable: React.FC<Props> = ({ apps, totalCost, unattributed = 0 }) => {
   const t = useTokens();
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
+  const hasShared = apps.some(app => app.sharedCost > 0);
 
   const toggle = (key: string) =>
     setExpanded(current => {
@@ -39,7 +44,7 @@ export const NamespaceAppsTable: React.FC<Props> = ({ apps, totalCost }) => {
 
   const row: React.CSSProperties = {
     display: 'grid',
-    gridTemplateColumns: COLUMNS,
+    gridTemplateColumns: columns(hasShared),
     alignItems: 'center',
     color: t.text,
     fontSize: '13px',
@@ -83,6 +88,11 @@ export const NamespaceAppsTable: React.FC<Props> = ({ apps, totalCost }) => {
               <span role="columnheader" style={numeric}>
                 Memory
               </span>
+              {hasShared && (
+                <span role="columnheader" style={numeric} title="Cost shared across the cluster, not the app's own usage">
+                  Shared
+                </span>
+              )}
               <span role="columnheader" style={numeric}>
                 Total
               </span>
@@ -98,17 +108,21 @@ export const NamespaceAppsTable: React.FC<Props> = ({ apps, totalCost }) => {
           {apps.map((app, index) => {
             // An application is its namespace and name: with apps-in-any-namespace, team-a/web and
             // team-b/web can both deploy here.
-            const key = `${app.namespace ?? ''}/${app.name ?? ''}`;
+            const key = `${app.namespace ?? ''}/${app.name ?? ''}/${app.group ?? ''}`;
             const open = expanded.has(key);
             const groupId = `cost-intel-namespace-app-${index}`;
             const href = appLink(app);
-            const label = app.name ?? 'Not managed by an Argo CD app';
+            const label = app.name ?? app.group ?? 'Not managed by an Argo CD app';
             const detail = app.visible
-              ? `${pluralize(app.controllers.length, 'controller')} · ${pluralize(app.podCount, 'pod')}`
+              ? `${app.group ? 'Not managed by an Argo CD app · ' : ''}${pluralize(app.controllers.length, 'controller')} · ${pluralize(app.podCount, 'pod')}`
               : 'Not listed by Argo CD';
             // Rounded so the cells beside each total add up to it, and the controllers to their app.
             const [appTotal] = roundParts([app.totalCost]);
-            const [appCpu, appRam] = roundColumns([app.cpuCost, app.ramCost], app.totalCost, appTotal);
+            const [appCpu, appRam, appShared = 0] = roundColumns(
+              hasShared ? [app.cpuCost, app.ramCost, app.sharedCost] : [app.cpuCost, app.ramCost],
+              app.totalCost,
+              appTotal
+            );
             const controllerTotals = roundParts(app.controllers.map(controller => controller.totalCost), appTotal);
             return (
               <div key={key} id={groupId} role="rowgroup" style={{ ...cardStyle(t), margin: '8px 0', overflow: 'hidden' }}>
@@ -157,6 +171,11 @@ export const NamespaceAppsTable: React.FC<Props> = ({ apps, totalCost }) => {
                   <span role="cell" style={numeric}>
                     {money(app, appRam)}
                   </span>
+                  {hasShared && (
+                    <span role="cell" style={numeric}>
+                      {money(app, appShared)}
+                    </span>
+                  )}
                   <span role="cell" style={{ ...numeric, color: t.textStrong, fontWeight: 500 }}>
                     {money(app, appTotal)}
                   </span>
@@ -176,7 +195,13 @@ export const NamespaceAppsTable: React.FC<Props> = ({ apps, totalCost }) => {
                 {open &&
                   app.controllers.map((controller, controllerIndex) => {
                     const controllerTotal = controllerTotals[controllerIndex];
-                    const [controllerCpu, controllerRam] = roundColumns([controller.cpuCost, controller.ramCost], controller.totalCost, controllerTotal);
+                    const [controllerCpu, controllerRam, controllerShared = 0] = roundColumns(
+                      hasShared
+                        ? [controller.cpuCost, controller.ramCost, controller.sharedCost]
+                        : [controller.cpuCost, controller.ramCost],
+                      controller.totalCost,
+                      controllerTotal
+                    );
                     return (
                       <div
                         key={controller.key}
@@ -196,6 +221,11 @@ export const NamespaceAppsTable: React.FC<Props> = ({ apps, totalCost }) => {
                         <span role="cell" style={numeric}>
                           {formatMoney(controllerRam)}
                         </span>
+                        {hasShared && (
+                          <span role="cell" style={numeric}>
+                            {formatMoney(controllerShared)}
+                          </span>
+                        )}
                         <span role="cell" style={numeric}>
                           {formatMoney(controllerTotal)}
                         </span>
@@ -209,6 +239,38 @@ export const NamespaceAppsTable: React.FC<Props> = ({ apps, totalCost }) => {
               </div>
             );
           })}
+
+          {unattributed >= 0.01 && (
+            <div role="rowgroup" style={{ ...cardStyle(t), margin: '8px 0', overflow: 'hidden' }}>
+              <div role="row" style={{ ...row, minHeight: '56px' }}>
+                <span role="cell" />
+                <span role="rowheader" style={{ ...cell, display: 'flex', flexDirection: 'column', gap: '2px' }}>
+                  <span style={{ ...truncated, color: t.textStrong, fontWeight: 500 }}>Not attributed to a pod</span>
+                  <span style={{ color: t.textMuted, fontSize: '12px' }}>
+                    In the namespace's cost, in no pod above, such as volumes no pod mounts
+                  </span>
+                </span>
+                <span role="cell" style={numeric}>
+                  —
+                </span>
+                <span role="cell" style={numeric}>
+                  —
+                </span>
+                {hasShared && (
+                  <span role="cell" style={numeric}>
+                    —
+                  </span>
+                )}
+                <span role="cell" style={{ ...numeric, color: t.textStrong, fontWeight: 500 }}>
+                  {formatMoney(unattributed)}
+                </span>
+                <span role="cell" style={cell}>
+                  <Share fraction={unattributed / (totalCost + unattributed)} t={t} />
+                </span>
+                <span role="cell" />
+              </div>
+            </div>
+          )}
         </div>
       </div>
     </section>

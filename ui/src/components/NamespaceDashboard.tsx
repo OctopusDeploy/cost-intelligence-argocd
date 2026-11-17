@@ -20,6 +20,9 @@ import { useContainerWidth } from '../hooks/useContainerWidth';
 import { useDataQuality } from '../hooks/useDataQuality';
 import { UseNamespaceDataResult, useNamespaceData } from '../hooks/useNamespaceData';
 import { UrlWrite, useUrlState } from '../hooks/useUrlState';
+import { useClusters } from '../hooks/useClusters';
+import api from '../utils/api';
+import { ClusterPicker } from './ClusterPicker';
 import { useWasteRanking } from '../hooks/useWasteRanking';
 import { Tokens, useTokens } from '../theme/tokens';
 import { ClusterOverhead, CostData, NamespaceSummary } from '../utils/api';
@@ -45,10 +48,62 @@ const PROVIDER_LABELS: Record<string, string> = { AWS: 'EKS', GCP: 'GKE', Azure:
 // NamespaceDashboard is the plugin's system-level page: cluster costs by namespace and application,
 // applications ranked by idle spend, and chargeback by Kubernetes label.
 export const NamespaceDashboard: React.FC = () => {
+  const clusters = useClusters();
+  const [urlCluster, setUrlCluster] = useUrlState<string>('costCluster', '');
+  // No cluster, or one the service does not list, is all of them. The live views (idle spend, chargeback,
+  // control plane, pricing) read one cluster at a time: all reads this one, the first listed.
+  const known = clusters.find(c => c.id === urlCluster);
+  const cluster = known && !known.local ? known.id : '';
+  const all = clusters.length > 1 && !known;
+  const live = all || !known ? clusters.find(c => c.local)?.id || '' : known.id;
+  // Set before the page below mounts and asks: its key makes a new cluster a fresh page.
+  api.setCluster(cluster);
+  api.setClusterFilter(known?.id ?? '');
+  const picker =
+    clusters.length > 1 ? <ClusterPicker clusters={clusters} value={known?.id ?? ''} onChange={setUrlCluster} /> : null;
+  return (
+    <ClusterDashboard
+      key={known?.id ?? ''}
+      picker={picker}
+      all={all}
+      clusterCount={clusters.length}
+      // The cluster the namespaces are filtered to, empty for all of them.
+      filter={known?.id ?? ''}
+      clusterName={live}
+    />
+  );
+};
+
+interface ClusterDashboardProps {
+  picker: React.ReactNode;
+  // all is true while every cluster is shown.
+  all: boolean;
+  clusterCount: number;
+  filter: string;
+  // clusterName is the cluster the live views read, in the cost backend's name; empty while there is nothing to choose.
+  clusterName: string;
+}
+
+const ClusterDashboard: React.FC<ClusterDashboardProps> = ({ picker, all, clusterCount, filter, clusterName }) => {
   // The open view and the selected namespace live in the URL, so this page can be linked to.
   const [view, setView] = useUrlState<View>('costTab', 'namespaces', VIEW_IDS);
   const [urlNamespace, setUrlNamespace] = useUrlState<string>('costNs', '');
-  const namespaceData = useNamespaceData(urlNamespace || null);
+  const loaded = useNamespaceData(urlNamespace || null);
+  // The stored costs are not tagged with a cluster; each namespace names the clusters its applications run on.
+  const shown = useMemo(
+    // Without the clusters named (the service could not list the applications), nothing can be filtered.
+    () =>
+      filter && loaded.namespaces.some(ns => ns.clusters?.length)
+        ? loaded.namespaces.filter(ns => ns.clusters?.includes(filter))
+        : loaded.namespaces,
+    [loaded.namespaces, filter]
+  );
+  const effectiveNs = shown.some(ns => ns.namespace === loaded.selectedNs) ? loaded.selectedNs : (shown[0]?.namespace ?? null);
+  const { setSelectedNs: selectLoadedNs } = loaded;
+  useEffect(() => {
+    if (effectiveNs && effectiveNs !== loaded.selectedNs) selectLoadedNs(effectiveNs);
+  }, [effectiveNs, loaded.selectedNs, selectLoadedNs]);
+  const namespaceData = useMemo(() => ({ ...loaded, namespaces: shown, selectedNs: effectiveNs }), [loaded, shown, effectiveNs]);
   const waste = useWasteRanking(view === 'idle');
   const { reload: reloadNamespaces } = namespaceData;
   const { reload: reloadWaste } = waste;
@@ -78,6 +133,7 @@ export const NamespaceDashboard: React.FC = () => {
       page
       status={
         <>
+          {picker}
           {latestMeasuredAt && <MeasuredLabel measuredAt={latestMeasuredAt} />}
           <ReloadButton onReload={reload} />
         </>
@@ -88,11 +144,19 @@ export const NamespaceDashboard: React.FC = () => {
       <div id={panelId(ID_PREFIX, view)} role="tabpanel" aria-labelledby={tabId(ID_PREFIX, view)} style={framePanelStyle}>
         {view === 'namespaces' && (
           <NamespacesView
+            all={all}
+            clusterCount={clusterCount}
+            clusterName={filter || clusterName}
             data={namespaceData}
             urlNamespace={urlNamespace}
             onSelectNamespace={setUrlNamespace}
             onShowIdleApps={() => setView('idle')}
           />
+        )}
+        {all && view === 'chargeback' && (
+          <Notice>
+            Chargeback is read from one cluster at a time: this is {clusterName}. Pick a cluster to see another.
+          </Notice>
         )}
         {view === 'idle' && (
           <IdleSpendView
@@ -109,13 +173,17 @@ export const NamespaceDashboard: React.FC = () => {
 };
 
 interface NamespacesViewProps {
+  // all is true while every cluster is shown; the live figures (control plane, pricing) then have no single cluster.
+  all: boolean;
+  clusterCount: number;
+  clusterName: string;
   data: UseNamespaceDataResult;
   urlNamespace: string;
   onSelectNamespace: (namespace: string, mode?: UrlWrite) => void;
   onShowIdleApps: () => void;
 }
 
-const NamespacesView: React.FC<NamespacesViewProps> = ({ data, urlNamespace, onSelectNamespace, onShowIdleApps }) => {
+const NamespacesView: React.FC<NamespacesViewProps> = ({ all, clusterCount, clusterName, data, urlNamespace, onSelectNamespace, onShowIdleApps }) => {
   const t = useTokens();
   const argo = useArgoApplications();
   const quality = useDataQuality();
@@ -163,14 +231,18 @@ const NamespacesView: React.FC<NamespacesViewProps> = ({ data, urlNamespace, onS
       <StatStrip
         stats={[
           {
-            label: 'Cluster monthly cost',
+            label: all ? 'All clusters monthly cost' : clusterName ? `${clusterName} monthly cost` : 'Cluster monthly cost',
             // The sum of the namespaces as listed, so the list adds up to it. Shares use the exact sum.
             value: formatMoney(sumRounded(namespaces.map(ns => ns.totalCost))),
-            detail: `${pluralize(namespaces.length, 'namespace')} · ${pluralize(appCount, 'app')}`,
+            detail: `${all ? `${pluralize(clusterCount, 'cluster')} · ` : ''}${pluralize(namespaces.length, 'namespace')} · ${pluralize(appCount, 'app')} · last 24 h × 30 days`,
           },
           clusterIdleStat(namespaces, onShowIdleApps, t),
-          controlPlaneStat(overhead, overheadError, t),
-          { label: 'Pricing', value: <PricingValue quality={quality} t={t} />, detail: pricingDetail(quality) },
+          ...(all
+            ? []
+            : [
+                controlPlaneStat(overhead, overheadError, t),
+                { label: 'Pricing', value: <PricingValue quality={quality} t={t} />, detail: pricingDetail(quality) },
+              ]),
         ]}
       />
 
@@ -183,7 +255,7 @@ const NamespacesView: React.FC<NamespacesViewProps> = ({ data, urlNamespace, onS
           alignItems: 'start',
         }}
       >
-        <NamespaceList namespaces={namespaces} selected={selectedNs} onSelect={select} clusterTotal={clusterTotal} />
+        <NamespaceList namespaces={namespaces} selected={selectedNs} onSelect={select} clusterTotal={clusterTotal} showClusters={all} />
         {selected && (
           <NamespaceDetail
             namespace={selected}
@@ -333,7 +405,15 @@ const NamespaceDetail: React.FC<NamespaceDetailProps> = ({
   if (loading && records.length === 0) applications = <Notice>Loading applications…</Notice>;
   else if (error) applications = <ErrorNotice message={error} />;
   else if (breakdown.apps.length === 0) applications = <Notice>No cost records for this namespace yet.</Notice>;
-  else applications = <NamespaceAppsTable apps={breakdown.apps} totalCost={breakdown.totalCost} />;
+  else {
+    applications = (
+      <NamespaceAppsTable
+        apps={breakdown.apps}
+        totalCost={breakdown.totalCost}
+        unattributed={namespace.totalCost - breakdown.totalCost}
+      />
+    );
+  }
 
   const paired = recommendation !== null && width >= PAIRED_ROW_MIN;
   const stats = (

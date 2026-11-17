@@ -60,7 +60,7 @@ const dark: Tokens = {
   success: '#3fcf8e',
   warning: '#f2c14e',
   danger: '#f07a72',
-  series: ['#3987e5', '#d95926', '#199e70', '#c98500', '#d55181', '#008300', '#9085e9'],
+  series: ['#3987e5', '#d95926', '#199e70', '#c98500', '#d55181', '#008300', '#9085e9', '#6e7781'],
 };
 
 const light: Tokens = {
@@ -85,7 +85,7 @@ const light: Tokens = {
   success: '#00875a',
   warning: '#e8a30a',
   danger: '#c7372f',
-  series: ['#2a78d6', '#eb6834', '#1baf7a', '#eda100', '#e87ba4', '#008300', '#4a3aa7'],
+  series: ['#2a78d6', '#eb6834', '#1baf7a', '#eda100', '#e87ba4', '#008300', '#4a3aa7', '#8b949e'],
 };
 
 export function getTokens(theme: Theme): Tokens {

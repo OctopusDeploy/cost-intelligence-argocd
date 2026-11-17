@@ -205,7 +205,7 @@ export function hasRequests(efficiency: EfficiencyMetrics): boolean {
 }
 
 export interface CostSlice {
-  id: 'cpu' | 'memory' | 'storage' | 'network' | 'cloud' | 'loadBalancer' | 'gpu';
+  id: 'cpu' | 'memory' | 'storage' | 'network' | 'cloud' | 'loadBalancer' | 'gpu' | 'shared';
   label: string;
   value: number;
   // slot is a fixed index into the categorical palette, so each cost keeps its colour.
@@ -224,6 +224,14 @@ export function costSlices(data: CostData): CostSlice[] {
     { label: 'NAT gateway', value: totals?.networkNatGatewayCost ?? 0 },
   ].filter(part => part.value > 0);
 
+  // Shared cost is a part of the total only when it was asked for (sharedCostIncluded); otherwise it
+  // is reported beside the total, not in it. Its sources are named: a namespace or tenancy costs.
+  const sharedParts = Object.entries(totals?.sharedCostBreakdown ?? {})
+    .map(([label, value]) => ({ label, value }))
+    .filter(part => part.value > 0)
+    .sort((a, b) => b.value - a.value);
+  const included = totals?.sharedCostIncluded ? (totals.sharedCost ?? 0) : 0;
+
   const slices: CostSlice[] = [
     { id: 'cpu', label: 'CPU', value: totals?.cpuCost ?? 0, slot: 0 },
     { id: 'memory', label: 'Memory', value: totals?.memoryCost ?? 0, slot: 1 },
@@ -238,6 +246,13 @@ export function costSlices(data: CostData): CostSlice[] {
     { id: 'cloud', label: 'Cloud services', value: data.cloudEstimate?.totalMonthlyCost ?? 0, slot: 4 },
     { id: 'loadBalancer', label: 'Load balancer', value: totals?.loadBalancerCost ?? 0, slot: 5 },
     { id: 'gpu', label: 'GPU', value: totals?.gpuCost ?? 0, slot: 6 },
+    {
+      id: 'shared',
+      label: 'Shared cost',
+      value: included,
+      slot: 7,
+      children: sharedParts.length > 0 ? sharedParts : undefined,
+    },
   ];
   return slices.filter(slice => slice.value > 0);
 }

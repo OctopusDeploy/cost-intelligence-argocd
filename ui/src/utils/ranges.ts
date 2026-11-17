@@ -95,11 +95,13 @@ export function queryRange(range: DayRange, today: string): DayRange {
 export type Granularity = 'day' | 'week' | 'month';
 
 // granularity picks how finely to draw a range: daily points up to about three months, then a bar
-// per week, and a bar per month beyond about six months, where daily points are only noise.
-export function granularity(range: DayRange): Granularity {
+// per week, and a bar per month beyond about six months, where daily points are only noise. With
+// weeklyOnly, for a backend that keeps only a couple of weeks of history, there are no month bars:
+// a bar per week covers whatever is longer than about three months.
+export function granularity(range: DayRange, weeklyOnly = false): Granularity {
   const days = spanDays(range);
   if (days <= 92) return 'day';
-  if (days <= 200) return 'week';
+  if (days <= 200 || weeklyOnly) return 'week';
   return 'month';
 }
 

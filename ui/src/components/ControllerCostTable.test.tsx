@@ -26,6 +26,7 @@ describe('ControllerCostTable', () => {
             pods: [pod('web-1'), pod('web-2')],
             cpuCost: 0.087,
             ramCost: 0.087,
+            sharedCost: 0,
             totalCost: 0.174,
             share: 1,
           },
@@ -45,5 +46,28 @@ describe('ControllerCostTable', () => {
       ['$0.05', '$0.04', '$0.09'],
       ['$0.04', '$0.04', '$0.08'],
     ]);
+  });
+
+  it('adds a Shared column only when shared cost is counted', () => {
+    const group = (sharedCost: number) => ({
+      key: 'Deployment/web',
+      kind: 'Deployment',
+      name: 'web',
+      pods: [{ ...pod('web-1'), sharedCost }],
+      cpuCost: 10,
+      ramCost: 5,
+      sharedCost,
+      totalCost: 15 + sharedCost,
+      share: 1,
+    });
+
+    const { unmount } = render(<ControllerCostTable groups={[group(0)]} />);
+    expect(screen.queryByRole('columnheader', { name: 'Shared' })).toBeNull();
+    unmount();
+
+    render(<ControllerCostTable groups={[group(7.5)]} />);
+    expect(screen.getByRole('columnheader', { name: 'Shared' })).toBeTruthy();
+    const cells = within(screen.getAllByRole('row')[1]).getAllByRole('cell').map(cell => cell.textContent);
+    expect(cells.filter(text => text?.startsWith('$'))).toEqual(['$10.00', '$5.00', '$7.50', '$22.50']);
   });
 });
