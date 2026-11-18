@@ -51,6 +51,7 @@ export const CostBreakdownCard: React.FC<{ data: CostData; namespace?: string }>
   const cloudResources = cloud?.resources ?? [];
   const carbonKg = totals?.carbonCost ?? 0;
   const shared = totals?.sharedCost ?? 0;
+  const sharedIncluded = totals?.sharedCostIncluded === true;
   const sharedParts = Object.entries(totals?.sharedCostBreakdown ?? {}).sort(([, a], [, b]) => b - a);
 
   const rowHeader: React.CSSProperties = { padding: '8px 0', fontWeight: 400, textAlign: 'left' };
@@ -170,7 +171,14 @@ export const CostBreakdownCard: React.FC<{ data: CostData; namespace?: string }>
         </tbody>
       </table>
 
-      {shared > 0 && (
+      {sharedIncluded && shared > 0 && (
+        <p style={{ margin: '8px 0 0', color: t.textMuted, fontSize: '12px', lineHeight: '18px' }}>
+          Shared cost is included in the total. It is not this {namespace ? 'namespace' : 'application'}&apos;s own usage: it is spread
+          from shared cluster costs, in proportion to cost.
+        </p>
+      )}
+
+      {!sharedIncluded && shared > 0 && (
         <div style={{ marginTop: '8px', paddingTop: '8px', borderTop: `1px solid ${t.hairline}` }}>
           <button
             type="button"
@@ -179,7 +187,7 @@ export const CostBreakdownCard: React.FC<{ data: CostData; namespace?: string }>
             style={{ ...toggleStyle, display: 'flex', width: '100%', gap: '8px', color: t.text, fontSize: '13px' }}
           >
             <ChevronIcon expanded={sharedOpen} size={12} />
-            <span style={{ flex: 1, textAlign: 'left' }}>Shared costs</span>
+            <span style={{ flex: 1, textAlign: 'left' }}>Shared costs (not in the total)</span>
             <span style={{ fontVariantNumeric: 'tabular-nums' }}>{formatMoney(shared)}</span>
           </button>
           {sharedOpen && (

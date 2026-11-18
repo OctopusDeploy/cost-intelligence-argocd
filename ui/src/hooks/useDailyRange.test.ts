@@ -54,6 +54,16 @@ describe('useDailyRange', () => {
     expect(result.current).toMatchObject({ loading: true, dailyCosts: null });
   });
 
+  it('reports when the service wants weekly aggregates at most', async () => {
+    getDailyCosts.mockResolvedValue({ ...answer(day('2026-09-01', 1)), maxGranularity: 'week' });
+    const { result } = renderHook(() => useDailyRange('redis', undefined, { from: '2025-10-04', to: TODAY }, TODAY));
+    expect(result.current.weeklyOnly).toBe(false);
+
+    await settle();
+
+    expect(result.current.weeklyOnly).toBe(true);
+  });
+
   it('drops the answer for a range that is no longer shown', async () => {
     let answerOld: (data: DailyCostData) => void = () => {};
     getDailyCosts.mockReturnValueOnce(new Promise(resolve => (answerOld = resolve)));

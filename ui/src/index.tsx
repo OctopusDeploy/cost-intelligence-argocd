@@ -1,6 +1,7 @@
 import React from 'react';
 import {CostIntelligenceTab} from './plugin';
 import { NamespaceDashboard } from './components/NamespaceDashboard';
+import { AppCostStatus } from './components/AppCostStatus';
 
 // Types from Argo CD's ui/src/app/shared/services/extensions-service.ts (identical in 3.4 and 3.5).
 // Argo CD types these callbacks loosely itself — any component, and the raw Application object —
@@ -17,6 +18,13 @@ declare global {
                 title: string,
                 icon: string,
                 shouldDisplay?: (app: any) => boolean
+            ): void;
+            // registerStatusPanelExtension(component, title, id, flyout?): an item of the status panel
+            // above the application's resource tree, next to Sync Status and Last Sync.
+            registerStatusPanelExtension(
+                component: React.ComponentType<any>,
+                title: string,
+                id: string
             ): void;
             // registerSystemLevelExtension(component, title, path, icon)
             // Unchanged since v2.x. onAddSystemLevelExtension in app.tsx builds
@@ -42,6 +50,9 @@ declare global {
         'fa fa-dollar-sign',
         () => true
     );
+
+    // The status panel reads getStatusPanelExtensions() when it renders, like app views do.
+    w.extensionsAPI.registerStatusPanelExtension(AppCostStatus, 'Monthly cost', 'cost-intelligence-status');
 
     // registerSystemLevelExtension MUST be deferred with setTimeout(0).
     //

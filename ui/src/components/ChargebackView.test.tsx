@@ -236,6 +236,21 @@ describe('ChargebackView results', () => {
     expect(within(rows[2]).getAllByRole('cell')[4].textContent).toBe('$0.00');
   });
 
+  it('adds Shared and External columns only when a value carries them', () => {
+    render(<ChargebackView namespaces={namespaces} />);
+    expect(screen.queryByRole('columnheader', { name: 'Shared' })).toBeNull();
+    expect(screen.queryByRole('columnheader', { name: 'External' })).toBeNull();
+  });
+
+  it('shows Shared and External costs beside the others', () => {
+    withEntries([{ ...entry('ml', 1000, 0.5), sharedCost: 40, externalCost: 25 }]);
+    render(<ChargebackView namespaces={namespaces} />);
+    expect(screen.getByRole('columnheader', { name: 'Shared' })).toBeTruthy();
+    expect(screen.getByRole('columnheader', { name: 'External' })).toBeTruthy();
+    const cells = within(screen.getAllByRole('row')[1]).getAllByRole('cell').map(cell => cell.textContent);
+    expect(cells.slice(4, 7)).toEqual(['$40.00', '$25.00', '$1,000.00']);
+  });
+
   it('rounds the cells so they add up to the total beside them, and the rows to the attributed cost', () => {
     const exact = (labelValue: string, cpuCost: number, ramCost: number): ChargebackEntry => ({
       labelValue,

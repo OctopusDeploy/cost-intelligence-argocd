@@ -3,6 +3,8 @@ import { CostPanel } from './components/CostPanel';
 import { RemoteClusterPanel } from './components/RemoteClusterPanel';
 import { AppContext } from './utils/api';
 import { Destination, otherCluster } from './utils/destination';
+import { useKnownClusters, useMeasuredClusters } from './hooks/useMeasuredClusters';
+import { managedControllersOf } from './utils/managedControllers';
 
 // Argo CD Plugin Interface
 export const plugin = {
@@ -13,9 +15,6 @@ export const plugin = {
 
 // This component renders in the Application details view
 // It receives props from Argo CD's plugin system
-// Kinds that directly own pods — used to filter status.resources to controllers.
-const POD_OWNER_KINDS = new Set(['Deployment', 'StatefulSet', 'DaemonSet', 'Job', 'CronJob', 'ReplicaSet']);
-
 export interface ApplicationDetailsTabProps {
   application: {
     metadata: {
@@ -52,22 +51,29 @@ export const CostIntelligenceTab: React.FC<ApplicationDetailsTabProps> = ({
 
   // Derive the set of controller names this ArgoCD app manages so the Resources
   // tab can filter OpenCost pod data down to just this app's resources.
-  const managedControllers = useMemo<Set<string>>(() => {
-    const resources = application?.status?.resources ?? [];
-    return new Set(
-      resources.filter(r => POD_OWNER_KINDS.has(r.kind)).map(r => r.name)
-    );
-  }, [application?.status?.resources]);
+  const managedControllers = useMemo<Set<string>>(
+    () => managedControllersOf(application?.status?.resources),
+    [application?.status?.resources]
+  );
+
+  // Where the application deploys is another cluster unless the service measures that one too.
+  const deploysElsewhere = otherCluster(application?.spec?.destination) !== null;
+  const measuredClusters = useMeasuredClusters(deploysElsewhere);
+  const knownClusters = useKnownClusters(deploysElsewhere);
 
   if (!appName) {
     return <div>Unable to determine application name</div>;
   }
+  if (deploysElsewhere && measuredClusters === null) {
+    return null; // the list of measured clusters is still loading
+  }
 
   // OpenCost measures only the cluster the service runs in, so an application deploying elsewhere has
-  // no cost to show, and its views would fetch nothing useful.
-  const cluster = otherCluster(application.spec?.destination);
+  // no cost to show, and its views would fetch nothing useful. Kubecost measures the clusters of its
+  // cluster map as well.
+  const cluster = otherCluster(application.spec?.destination, measuredClusters ?? []);
   if (cluster) {
-    return <RemoteClusterPanel cluster={cluster} />;
+    return <RemoteClusterPanel cluster={cluster} known={knownClusters} mapped={measuredClusters ?? []} />;
   }
 
   return <CostPanel appName={appName} appCtx={appCtx} managedControllers={managedControllers} />;

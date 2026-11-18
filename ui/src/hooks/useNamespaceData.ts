@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { CostData, fetchNamespaceApps, fetchNamespaces, NamespaceSummary } from '../utils/api';
+import { findNamespace, namespaceKey, splitNamespaceKey } from '../utils/namespaceKey';
 
 export interface UseNamespaceDataResult {
   namespaces: NamespaceSummary[];
   namespacesLoading: boolean;
   namespacesError: string | null;
+  // selectedNs is a namespace key (see namespaceKey): its cluster and name, or its name alone.
   selectedNs: string | null;
   setSelectedNs: (namespace: string) => void;
   // apps holds the latest cost record of each application in the selected namespace.
@@ -48,7 +50,7 @@ export function useNamespaceData(initialNamespace: string | null = null): UseNam
       setNamespaces(list);
       setNamespacesError(null);
       setSelectedNs(current =>
-        current && list.some(ns => ns.namespace === current) ? current : (list[0]?.namespace ?? null)
+        current && findNamespace(list, current) ? current : (list[0] ? namespaceKey(list[0]) : null)
       );
     } catch (err) {
       if (!background) setNamespacesError(errorMessage(err, 'Failed to fetch namespaces'));
@@ -68,7 +70,8 @@ export function useNamespaceData(initialNamespace: string | null = null): UseNam
       setAppsError(null);
     }
     try {
-      const records = await fetchNamespaceApps(namespace);
+      const { cluster, namespace: name } = splitNamespaceKey(namespace);
+      const records = cluster ? await fetchNamespaceApps(name, cluster) : await fetchNamespaceApps(name);
       if (request === appsRequest.current) {
         setApps({ namespace, records });
         setAppsError(null);
