@@ -33,21 +33,53 @@ func (s *CostAPIServer) handleGetWaste(w http.ResponseWriter, r *http.Request) {
 			render.JSON(w, r, map[string]string{"error": "failed to list Argo CD applications"})
 			return
 		}
-		local = localApplications(apps)
+		local = measuredApplications(apps, s.scope)
+		// A cluster picked on the page leaves out the applications of the others.
+		if cluster := r.URL.Query().Get("cluster"); cluster != "" && len(s.choices()) > 0 {
+			local = s.applicationsIn(apps, cluster)
+		}
 	}
 
 	render.JSON(w, r, rankWaste(records, local))
 }
 
-// localApplications is the set of Applications deploying to this cluster.
-func localApplications(apps []exporter.Application) map[models.AppRef]bool {
-	local := make(map[models.AppRef]bool, len(apps))
+// measuredApplications is the set of Applications whose cost is measured: those deploying to this
+// cluster, and with a scope that maps other clusters, those deploying to them.
+func measuredApplications(apps []exporter.Application, scope exporter.Scope) map[models.AppRef]bool {
+	measured := make(map[models.AppRef]bool, len(apps))
 	for _, app := range apps {
-		if app.Destination.Local() {
-			local[app.Ref] = true
+		if _, ok := scope.ClusterFor(app.Destination); ok {
+			measured[app.Ref] = true
 		}
 	}
-	return local
+	return measured
+}
+
+// applicationsIn is the set of Applications measured in one cluster, by its name in the cost backend.
+func (s *CostAPIServer) applicationsIn(apps []exporter.Application, cluster string) map[models.AppRef]bool {
+	local := s.localClusterID()
+	in := map[models.AppRef]bool{}
+	for _, app := range apps {
+		id, ok := s.scope.ClusterFor(app.Destination)
+		if id == "" {
+			id = local
+		}
+		if ok && id == cluster {
+			in[app.Ref] = true
+		}
+	}
+	return in
+}
+
+// localClusterID is the name in the cost backend of the cluster this service runs in, empty when it
+// does not say.
+func (s *CostAPIServer) localClusterID() string {
+	for _, c := range s.choices() {
+		if c.Local {
+			return c.ID
+		}
+	}
+	return ""
 }
 
 // rankWaste ranks the applications measured on their own by idle cost, from records holding each

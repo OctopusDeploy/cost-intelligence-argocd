@@ -100,7 +100,8 @@ ingress:
       hosts:
         - cost-intel.prod.example.com
 
-nodeSelector: []
+nodeSelector:
+  karpenter.sh/nodepool: argocd
 
 affinity:
   podAntiAffinity:

@@ -19,6 +19,7 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
 FROM alpine:3.22
 
 RUN apk add --no-cache ca-certificates curl \
+    && apk upgrade --no-cache zlib \
     && adduser -D -u 1000 app
 
 WORKDIR /app

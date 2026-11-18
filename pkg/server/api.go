@@ -10,6 +10,8 @@ import (
 	"math"
 	"net/http"
 	"net/url"
+	"slices"
+	"sort"
 	"strconv"
 	"time"
 
@@ -87,6 +89,17 @@ type CostAPIServer struct {
 
 	// metrics records the API's own metrics. Nil records nothing.
 	metrics *telemetry.Metrics
+	// scope says which cluster of the cost backend an Application is measured in. Default: this one only.
+	scope exporter.Scope
+	// clusters are the clusters the cluster-wide pages can show, the first being this one. Empty when
+	// the cost backend measures only this one.
+	clusters []ClusterChoice
+	// discovered returns the cluster names the cost backend reports, when it is asked. Nil without discovery.
+	discovered func() []string
+	// measured lists the other clusters whose Applications are measured, for the UI.
+	measured []MeasuredCluster
+	// weeklyOnly has the UI aggregate long ranges by week, never by month.
+	weeklyOnly bool
 }
 
 // Option configures a CostAPIServer.
@@ -138,6 +151,93 @@ func WithUnmeasuredApp(app models.AppRef) Option {
 }
 
 // WithMetrics records HTTP requests, sync webhooks and measurements on m.
+// MeasuredCluster is a cluster other than this one whose Applications are measured, as Argo CD names it.
+type MeasuredCluster struct {
+	Server string `json:"server,omitempty"`
+	Name   string `json:"name,omitempty"`
+}
+
+// ClusterChoice is a cluster the cluster-wide pages can show, by its name in the cost backend.
+type ClusterChoice struct {
+	ID    string `json:"id"`
+	Local bool   `json:"local,omitempty"`
+}
+
+// WithClusters lists the clusters the cluster-wide pages can show; the first is the one this service
+// runs in. With fewer than two there is nothing to choose.
+func WithClusters(clusters []ClusterChoice) Option {
+	return func(s *CostAPIServer) { s.clusters = clusters }
+}
+
+// WithDiscoveredClusters adds the clusters the cost backend reports to those the cluster-wide pages can
+// show, and tells the UI they are measured (an Argo CD cluster named like one is).
+func WithDiscoveredClusters(names func() []string) Option {
+	return func(s *CostAPIServer) { s.discovered = names }
+}
+
+// choices are the clusters the cluster-wide pages can show: those listed, then those discovered.
+func (s *CostAPIServer) choices() []ClusterChoice {
+	if len(s.clusters) == 0 || s.discovered == nil {
+		return s.clusters
+	}
+	have := map[string]bool{}
+	choices := append([]ClusterChoice(nil), s.clusters...)
+	for _, c := range choices {
+		have[c.ID] = true
+	}
+	for _, id := range s.discovered() {
+		if !have[id] {
+			have[id] = true
+			choices = append(choices, ClusterChoice{ID: id})
+		}
+	}
+	return choices
+}
+
+// selectCluster has a cluster-wide request read the cluster named by ?cluster=, one of s.clusters.
+// Without a list, or without the parameter, the request reads this cluster, as before.
+func (s *CostAPIServer) selectCluster(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		id := r.URL.Query().Get("cluster")
+		choices := s.choices()
+		if id == "" || len(choices) == 0 {
+			next.ServeHTTP(w, r)
+			return
+		}
+		for _, c := range choices {
+			if c.ID == id {
+				next.ServeHTTP(w, r.WithContext(opencost.WithCluster(r.Context(), id)))
+				return
+			}
+		}
+		render.Status(r, http.StatusBadRequest)
+		render.JSON(w, r, map[string]string{"error": "unknown cluster"})
+	})
+}
+
+// requestCluster is the cluster ?cluster= named on a cluster-wide request, by its id in the cost
+// backend; empty when the request names none, and it then reads the namespaces of every cluster.
+func (s *CostAPIServer) requestCluster(ctx context.Context) string {
+	return opencost.ClusterIn(ctx)
+}
+
+// WithScope says which cluster of the cost backend each Application is measured in.
+func WithScope(scope exporter.Scope) Option {
+	return func(s *CostAPIServer) { s.scope = scope }
+}
+
+// WithMeasuredClusters lists the other clusters whose Applications are measured, so the UI shows their
+// cost instead of saying they deploy elsewhere.
+func WithMeasuredClusters(clusters []MeasuredCluster) Option {
+	return func(s *CostAPIServer) { s.measured = clusters }
+}
+
+// WithWeeklyAggregates tells the UI to draw long ranges as weekly bars, never monthly ones, as the
+// history of a backend that keeps only a couple of weeks is too short for months.
+func WithWeeklyAggregates() Option {
+	return func(s *CostAPIServer) { s.weeklyOnly = true }
+}
+
 func WithMetrics(m *telemetry.Metrics) Option {
 	return func(s *CostAPIServer) { s.metrics = m }
 }
@@ -167,6 +267,7 @@ func NewCostAPIServer(
 		opencostCli: opencostCli,
 		logger:      logger,
 		syncSem:     make(chan struct{}, maxConcurrentSyncs),
+		scope:       exporter.LocalOnly{},
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -207,6 +308,7 @@ func (s *CostAPIServer) setupRoutes() {
 
 		r.Group(func(r chi.Router) {
 			r.Use(s.requireClusterScope)
+			r.Use(s.selectCluster)
 			r.Get("/namespaces", s.handleListNamespaces)
 			r.Get("/namespace/{namespace}/summary", s.handleGetNamespaceSummary)
 			r.Get("/namespace/{ns}/apps", s.handleGetNamespaceApps)
@@ -223,6 +325,7 @@ func (s *CostAPIServer) setupRoutes() {
 			r.Post("/cloud-estimate", appScoped(s.handlePostCloudEstimate))
 			r.Get("/trend", appScoped(s.handleGetCostTrend))
 			r.Get("/daily", appScoped(s.handleGetDailyCosts))
+			r.Get("/month", appScoped(s.handleGetMonth))
 			r.Get("/orphaned-pods", appScoped(s.handleGetAppOrphanedPods))
 			r.Get("/rightsizing", appScoped(s.handleGetRightsizing))
 		})
@@ -270,7 +373,7 @@ func (s *CostAPIServer) handleOnSync(w http.ResponseWriter, r *http.Request) {
 	// OpenCost measures only this cluster, so an application deploying elsewhere has nothing to
 	// measure here, nor does a retry of its earlier sync here. Answered before the pool, as nothing runs
 	// in the background.
-	if !hook.DeploysHere(&notification) {
+	if !s.syncHook.DeploysHere(&notification) {
 		s.syncHook.OnRemoteSync(models.AppRef{Namespace: notification.ApplicationNamespace, Name: notification.ApplicationName})
 		s.logger.Printf("Not measuring sync notification for %s/%s: the application deploys to another cluster (server %q, name %q)\n",
 			notification.ApplicationNamespace, notification.ApplicationName, notification.DestinationServer, notification.DestinationName)
@@ -551,7 +654,7 @@ func (s *CostAPIServer) handleGetNamespaceSummary(w http.ResponseWriter, r *http
 	}
 
 	ctx := r.Context()
-	avgCost, err := s.costStorage.GetNamespaceCostSummary(ctx, namespace, days)
+	avgCost, err := s.costStorage.GetNamespaceCostSummary(ctx, s.requestCluster(ctx), namespace, days)
 	if err != nil {
 		s.logger.Printf("Error retrieving namespace summary for %s: %v\n", namespace, err)
 		render.Status(r, http.StatusInternalServerError)
@@ -616,8 +719,9 @@ func (s *CostAPIServer) handleGetDailyCosts(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
+	ctx, _ := s.placement(r.Context(), app)
 	target := history.Target{App: app, Namespace: namespace, Resources: resources}
-	dailyCosts, err := history.Daily(r.Context(), s.costStorage, s.opencostCli, target, from, to)
+	dailyCosts, err := history.Daily(ctx, s.costStorage, s.opencostCli, target, from, to)
 	if err != nil {
 		s.logger.Printf("Error retrieving daily costs for %s (namespace %s): %v\n", app, namespace, err)
 		render.Status(r, http.StatusInternalServerError)
@@ -625,14 +729,54 @@ func (s *CostAPIServer) handleGetDailyCosts(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	render.JSON(w, r, map[string]any{
+	body := map[string]any{
 		"applicationName": app.Name,
 		"namespace":       namespace,
 		"scope":           models.ScopeOf(resources),
 		"days":            days,
 		"dailyCosts":      dailyCosts,
-	})
+	}
+	if s.weeklyOnly {
+		body["maxGranularity"] = "week"
+	}
+	w.Header().Set("Content-Type", "application/json")
+	render.JSON(w, r, body)
+}
+
+// GET /api/cost-analysis/{appName}/month
+// Returns what the application has cost so far this calendar month (UTC) and what the month will
+// cost at the run rate of its last complete days, the figure AWS bills at month end. Both come from
+// the daily history, so pods that no longer exist count. Without any history the answer is
+// available: false.
+func (s *CostAPIServer) handleGetMonth(w http.ResponseWriter, r *http.Request, app models.AppRef) {
+	namespace, resources, ok := s.appTarget(w, r, app)
+	if !ok {
+		return
+	}
+
+	now := time.Now()
+	ctx, _ := s.placement(r.Context(), app)
+	target := history.Target{App: app, Namespace: namespace, Resources: resources}
+	dailyCosts, err := history.Daily(ctx, s.costStorage, s.opencostCli, target, history.MonthFrom(now), now)
+	if err != nil {
+		s.logger.Printf("Error retrieving month cost for %s (namespace %s): %v\n", app, namespace, err)
+		render.Status(r, http.StatusInternalServerError)
+		render.JSON(w, r, map[string]string{"error": "failed to retrieve month cost"})
+		return
+	}
+
+	body := map[string]any{
+		"applicationName": app.Name,
+		"namespace":       namespace,
+		"scope":           models.ScopeOf(resources),
+		"available":       false,
+	}
+	if month, ok := history.SummariseMonth(dailyCosts, now); ok {
+		body["available"] = true
+		body["month"] = month
+	}
+	w.Header().Set("Content-Type", "application/json")
+	render.JSON(w, r, body)
 }
 
 // dailyRange reads the UTC days a /daily request asks for, both included: ?from= through ?to=
@@ -685,8 +829,58 @@ func (s *CostAPIServer) handleListNamespaces(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
+	s.nameClusters(ctx, namespaces)
+
 	w.Header().Set("Content-Type", "application/json")
 	render.JSON(w, r, map[string]any{"namespaces": namespaces})
+}
+
+// nameClusters sets, on each namespace, the clusters it runs on, so the page can filter namespaces by
+// cluster: the cluster its cost was measured in when stored, else (records from before it was stored)
+// those the live Applications deploying there run on. The latter does nothing when the backend
+// measures a single cluster or the Applications can't be listed.
+func (s *CostAPIServer) nameClusters(ctx context.Context, namespaces []models.NamespaceSummary) {
+	for i := range namespaces {
+		if namespaces[i].Cluster != "" {
+			namespaces[i].Clusters = []string{namespaces[i].Cluster}
+		}
+	}
+	choices := s.choices()
+	if s.applications == nil || len(choices) < 2 {
+		return
+	}
+	apps, err := s.applications.List(ctx)
+	if err != nil {
+		s.logger.Printf("Error listing Argo CD Applications to name the clusters of namespaces: %v\n", err)
+		return
+	}
+	local := s.localClusterID()
+	byNamespace := map[string]map[string]bool{}
+	for _, a := range apps {
+		id, ok := s.scope.ClusterFor(a.Destination)
+		if !ok || a.Destination.Namespace == "" {
+			continue
+		}
+		if id == "" {
+			id = local
+		}
+		if id == "" {
+			continue
+		}
+		if byNamespace[a.Destination.Namespace] == nil {
+			byNamespace[a.Destination.Namespace] = map[string]bool{}
+		}
+		byNamespace[a.Destination.Namespace][id] = true
+	}
+	for i := range namespaces {
+		if namespaces[i].Cluster != "" {
+			continue
+		}
+		for id := range byNamespace[namespaces[i].Namespace] {
+			namespaces[i].Clusters = append(namespaces[i].Clusters, id)
+		}
+		sort.Strings(namespaces[i].Clusters)
+	}
 }
 
 // GET /api/cost-analysis/namespace/{ns}/apps
@@ -695,12 +889,29 @@ func (s *CostAPIServer) handleGetNamespaceApps(w http.ResponseWriter, r *http.Re
 	ns := chi.URLParam(r, "ns")
 	ctx := r.Context()
 
-	apps, err := s.costStorage.GetLatestActualsForNamespace(ctx, ns)
+	apps, err := s.costStorage.GetLatestActualsForNamespace(ctx, s.requestCluster(ctx), ns)
 	if err != nil {
 		s.logger.Printf("Error retrieving apps for namespace %s: %v\n", ns, err)
 		render.Status(r, http.StatusInternalServerError)
 		render.JSON(w, r, map[string]string{"error": "failed to retrieve namespace apps"})
 		return
+	}
+
+	// A cluster picked on the page leaves out the applications of the others: a namespace of the same
+	// name elsewhere is not theirs. Without the live list the records are served as they are.
+	if cluster := r.URL.Query().Get("cluster"); cluster != "" && s.applications != nil && len(s.choices()) > 0 {
+		if live, err := s.applications.List(ctx); err != nil {
+			s.logger.Printf("Error listing Argo CD Applications to filter the apps of namespace %s: %v\n", ns, err)
+		} else {
+			in := s.applicationsIn(live, cluster)
+			kept := apps[:0:0]
+			for _, a := range apps {
+				if in[models.AppRef{Namespace: a.ApplicationNamespace, Name: a.ApplicationName}] {
+					kept = append(kept, a)
+				}
+			}
+			apps = kept
+		}
 	}
 
 	if len(apps) == 0 {
@@ -710,7 +921,11 @@ func (s *CostAPIServer) handleGetNamespaceApps(w http.ResponseWriter, r *http.Re
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	render.JSON(w, r, map[string]any{"apps": apps})
+	views := make([]models.CostActual, len(apps))
+	for i, a := range apps {
+		views[i] = a.WithOwnedPods()
+	}
+	render.JSON(w, r, map[string]any{"apps": views})
 }
 
 // GET /api/cost-analysis/namespace/{ns}/orphaned-pods
@@ -737,7 +952,8 @@ func (s *CostAPIServer) handleGetRightsizing(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	unavailable := models.Rightsizing{Workloads: []models.WorkloadRightsizing{}}
-	if s.vpaLister == nil {
+	ctx, here := s.placement(r.Context(), app)
+	if s.vpaLister == nil || !here { // the VPAs here are not those of an application deployed elsewhere
 		render.JSON(w, r, unavailable)
 		return
 	}
@@ -756,7 +972,7 @@ func (s *CostAPIServer) handleGetRightsizing(w http.ResponseWriter, r *http.Requ
 
 	var containers []models.ContainerAllocation
 	if len(vpas) > 0 && resources != nil {
-		if containers, err = s.opencostCli.GetContainerAllocations(r.Context(), namespace); err != nil {
+		if containers, err = s.opencostCli.GetContainerAllocations(ctx, namespace); err != nil {
 			s.logger.Printf("Error retrieving container allocations for %s (namespace %s): %v\n", app, namespace, err)
 			render.Status(r, http.StatusInternalServerError)
 			render.JSON(w, r, map[string]string{"error": "failed to retrieve container costs"})
@@ -774,27 +990,35 @@ func (s *CostAPIServer) handleGetAppOrphanedPods(w http.ResponseWriter, r *http.
 	if !ok {
 		return
 	}
-	s.writeOrphanedPods(w, r, ns, resources, s.soleApplication(r.Context(), app, ns))
+	ctx, _ := s.placement(r.Context(), app)
+	s.writeOrphanedPods(w, r.WithContext(ctx), ns, resources, s.soleApplication(r.Context(), app, ns))
 }
 
-// soleApplication reports whether app is the only Application deploying to namespace on this cluster,
-// and so owns the pods no application's controllers claim. An Application list that can't be read, or
-// none configured, is no.
+// soleApplication reports whether app is the only Application deploying to namespace in its cluster,
+// which then owns the pods without a controller that carry an unowned pod label. Without the live
+// Application list it is no.
 func (s *CostAPIServer) soleApplication(ctx context.Context, app models.AppRef, namespace string) bool {
 	if s.applications == nil {
 		return false
 	}
 	apps, err := s.applications.List(ctx)
 	if err != nil {
-		s.logger.Printf("Warning: listing Applications for %s: %v\n", namespace, err)
+		s.logger.Printf("Error listing Argo CD Applications to tell if %s is alone in %s: %v\n", app, namespace, err)
 		return false
 	}
-	sole, ok := exporter.SoleApplication(apps, namespace)
-	return ok && sole == app
+	for _, a := range apps {
+		if a.Ref != app {
+			continue
+		}
+		cluster, _ := s.scope.ClusterFor(a.Destination)
+		sole, ok := exporter.SoleApplication(apps, s.scope, cluster, namespace)
+		return ok && sole == app
+	}
+	return false
 }
 
-// writeOrphanedPods writes a namespace's orphaned pods, only those the resources own (by controller or
-// owner label, and with sole the unowned pods too) unless they are nil.
+// writeOrphanedPods writes a namespace's orphaned pods, only those the resources own unless they are
+// nil. sole is whether the resources' application is alone in the namespace.
 func (s *CostAPIServer) writeOrphanedPods(w http.ResponseWriter, r *http.Request, ns string, resources models.ManagedResources, sole bool) {
 	all, err := s.opencostCli.GetOrphanedPods(r.Context(), ns)
 	if err != nil {
@@ -807,8 +1031,12 @@ func (s *CostAPIServer) writeOrphanedPods(w http.ResponseWriter, r *http.Request
 	if resources != nil {
 		pods = []models.OrphanedPod{}
 		for _, p := range all {
-			if resources.OwnsPodLabeled(p.Namespace, p.ControllerKind, p.Controller, p.Name, p.Labels) ||
-				sole && resources.OwnsUnownedPod(p.Namespace, p.ControllerKind, p.Controller, p.Labels) {
+			podNS := p.Namespace
+			if podNS == "" {
+				podNS = ns
+			}
+			if resources.OwnsPodLabeled(podNS, p.ControllerKind, p.Controller, p.Name, p.Labels) ||
+				sole && resources.OwnsUnownedPod(podNS, p.ControllerKind, p.Controller, p.Labels) {
 				pods = append(pods, p)
 			}
 		}
@@ -909,7 +1137,52 @@ func (s *CostAPIServer) handleGetClusterOverhead(w http.ResponseWriter, r *http.
 // Tells the UI which Application gates cluster-wide cost data, so it can send that Application
 // in its proxy headers. clusterScopeApp is null when cluster-wide data is turned off.
 func (s *CostAPIServer) handleGetConfig(w http.ResponseWriter, r *http.Request) {
-	render.JSON(w, r, map[string]any{"clusterScopeApp": s.clusterScopeApp(r.Context())})
+	measured := s.measured
+	if measured == nil {
+		measured = []MeasuredCluster{}
+	}
+	clusters := s.choices()
+	if len(clusters) < 2 {
+		clusters = []ClusterChoice{} // nothing to choose
+	}
+	known := []string{}
+	if s.discovered != nil {
+		known = s.discovered()
+		for _, id := range known {
+			measured = append(slices.Clip(measured), MeasuredCluster{Name: id})
+		}
+	}
+	render.JSON(w, r, map[string]any{
+		// The cluster names the cost backend reports, for the message about a cluster that is not measured.
+		"knownClusters":   known,
+		"clusterScopeApp": s.clusterScopeApp(r.Context()),
+		// The clusters the cluster-wide pages can show, this one first, when there are several.
+		"clusters": clusters,
+		// Clusters other than this one whose Applications are measured (Kubecost with a cluster map).
+		"measuredClusters": measured,
+	})
+}
+
+// placement is where an Application's cost is measured: ctx carries its cluster for the cost backend,
+// and here is whether it deploys to the cluster this service runs in, the only one its VPAs and pods
+// can be read from.
+func (s *CostAPIServer) placement(ctx context.Context, app models.AppRef) (context.Context, bool) {
+	if s.applications == nil {
+		return ctx, true
+	}
+	apps, err := s.applications.List(ctx)
+	if err != nil {
+		s.logger.Printf("Error listing Argo CD Applications to place %s: %v\n", app, err)
+		return ctx, true
+	}
+	for _, a := range apps {
+		if a.Ref != app {
+			continue
+		}
+		id, _ := s.scope.ClusterFor(a.Destination)
+		return opencost.WithCluster(ctx, id), a.Destination.Local()
+	}
+	return ctx, true
 }
 
 // GET /api/cost-analysis/data-quality

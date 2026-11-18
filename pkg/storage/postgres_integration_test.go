@@ -327,11 +327,11 @@ func TestGetNamespaceCostSummary_FiltersByDeploymentNamespace(t *testing.T) {
 	saveNamespaceRecord(t, "p2", "app-a", "production", daysAgoAt(1, 12), 200.0)
 	saveNamespaceRecord(t, "s1", "app-b", "staging", daysAgoAt(1, 12), 999.0)
 
-	avg, err := testStorage.GetNamespaceCostSummary(context.Background(), "production", 30)
+	avg, err := testStorage.GetNamespaceCostSummary(context.Background(), "", "production", 30)
 	require.NoError(t, err)
 	assert.InDelta(t, 150.0, avg, 0.01, "average of production's days, 100 and 200; staging excluded")
 
-	avg, err = testStorage.GetNamespaceCostSummary(context.Background(), "argocd", 30)
+	avg, err = testStorage.GetNamespaceCostSummary(context.Background(), "", "argocd", 30)
 	require.NoError(t, err)
 	assert.InDelta(t, 0.0, avg, 1e-9, "argocd is where the Application resources live, not where anything deploys")
 }
@@ -346,7 +346,7 @@ func TestGetNamespaceCostSummary_SharedNamespace_CountsEachDayOnce(t *testing.T)
 	saveNamespaceRecord(t, "c1", "app-c", "shared", daysAgoAt(2, 10), 100.0)
 	saveNamespaceRecord(t, "a2", "app-a", "shared", daysAgoAt(1, 10), 400.0)
 
-	avg, err := testStorage.GetNamespaceCostSummary(context.Background(), "shared", 30)
+	avg, err := testStorage.GetNamespaceCostSummary(context.Background(), "", "shared", 30)
 	require.NoError(t, err)
 	assert.InDelta(t, 250.0, avg, 0.01, "each day counts once: (100 + 400) / 2, not (3*100 + 400) / 4")
 }
@@ -358,7 +358,7 @@ func TestGetNamespaceCostSummary_LatestMeasurementOfDayWins(t *testing.T) {
 	saveNamespaceRecord(t, "late", "app-b", "production", daysAgoAt(2, 20), 100.0)
 	saveNamespaceRecord(t, "next", "app-a", "production", daysAgoAt(1, 8), 300.0)
 
-	avg, err := testStorage.GetNamespaceCostSummary(context.Background(), "production", 30)
+	avg, err := testStorage.GetNamespaceCostSummary(context.Background(), "", "production", 30)
 	require.NoError(t, err)
 	assert.InDelta(t, 200.0, avg, 0.01, "a day is its latest measurement: (100 + 300) / 2")
 }
@@ -366,7 +366,7 @@ func TestGetNamespaceCostSummary_LatestMeasurementOfDayWins(t *testing.T) {
 func TestGetNamespaceCostSummary_EmptyNamespace_ReturnsZero(t *testing.T) {
 	truncate(t)
 
-	avg, err := testStorage.GetNamespaceCostSummary(context.Background(), "nonexistent-ns", 30)
+	avg, err := testStorage.GetNamespaceCostSummary(context.Background(), "", "nonexistent-ns", 30)
 	require.NoError(t, err)
 	assert.InDelta(t, 0.0, avg, 1e-9)
 }
@@ -415,7 +415,7 @@ func TestGetNamespaceCostSummary_ExcludesOldRecords(t *testing.T) {
 	saveNamespaceRecord(t, "new", "app-a", "production", daysAgoAt(1, 12), 100.0)
 	saveNamespaceRecord(t, "old", "app-b", "production", daysAgoAt(8, 12), 999.0)
 
-	avg, err := testStorage.GetNamespaceCostSummary(context.Background(), "production", 7)
+	avg, err := testStorage.GetNamespaceCostSummary(context.Background(), "", "production", 7)
 	require.NoError(t, err)
 	assert.InDelta(t, 100.0, avg, 0.01, "old record outside the window should be excluded")
 }
@@ -579,7 +579,7 @@ func TestLatestActualsForNamespace_CountsSameNamedAppsSeparately(t *testing.T) {
 		require.NoError(t, testStorage.SaveActual(context.Background(), r))
 	}
 
-	apps, err := testStorage.GetLatestActualsForNamespace(context.Background(), "shared")
+	apps, err := testStorage.GetLatestActualsForNamespace(context.Background(), "", "shared")
 	require.NoError(t, err)
 	assert.Len(t, apps, 2, "team-a:web and team-b:web are different applications")
 
@@ -1097,7 +1097,7 @@ func TestSaveFirstActual_StoresAMeasurementAtInstallWithoutASync(t *testing.T) {
 	assert.Equal(t, models.MeasuredOnInstall, inRange[0].MeasuredOn)
 	assert.True(t, inRange[0].SyncTimestamp.IsZero())
 
-	inNamespace, err := testStorage.GetLatestActualsForNamespace(ctx, "shop")
+	inNamespace, err := testStorage.GetLatestActualsForNamespace(ctx, "", "shop")
 	require.NoError(t, err)
 	require.Len(t, inNamespace, 1)
 	assert.Equal(t, models.MeasuredOnInstall, inNamespace[0].MeasuredOn)
@@ -1228,6 +1228,71 @@ func TestMigration010_AddsIdleMonthlyCost(t *testing.T) {
 		VALUES ('new', 'api', 'argocd', '2026-10-02 10:00:00', '2026-10-02 10:00:00', 1, 0.5)`)
 
 	require.NoError(t, m.Migrate(9))
+	var count int
+	require.NoError(t, db.QueryRowContext(context.Background(), "SELECT count(*) FROM cost_actuals").Scan(&count))
+	assert.Equal(t, 2, count, "down keeps every record")
+}
+
+func TestNamespaces_SameNameOnTwoClustersStaySeparate(t *testing.T) {
+	truncate(t)
+
+	now := time.Now().UTC().Truncate(time.Second)
+	for _, r := range []*models.CostActual{
+		{ID: "e1", ApplicationName: "web-eu", ApplicationNamespace: "argocd", DeploymentNamespace: "shop", Cluster: "eu", SyncTimestamp: now, MeasuredAt: now, TotalMonthlyCost: 10},
+		{ID: "u1", ApplicationName: "web-us", ApplicationNamespace: "argocd", DeploymentNamespace: "shop", Cluster: "us", SyncTimestamp: now, MeasuredAt: now, TotalMonthlyCost: 70},
+	} {
+		require.NoError(t, testStorage.SaveActual(context.Background(), r))
+	}
+
+	got, err := testStorage.ListNamespaces(context.Background())
+	require.NoError(t, err)
+	require.Len(t, got, 2, "one row per cluster")
+	assert.Equal(t, "us", got[0].Cluster)
+	assert.InDelta(t, 70.0, got[0].TotalCost, 0.01)
+	assert.Equal(t, "eu", got[1].Cluster)
+	assert.InDelta(t, 10.0, got[1].TotalCost, 0.01)
+
+	apps, err := testStorage.GetLatestActualsForNamespace(context.Background(), "eu", "shop")
+	require.NoError(t, err)
+	require.Len(t, apps, 1)
+	assert.Equal(t, "web-eu", apps[0].ApplicationName)
+	assert.Equal(t, "eu", apps[0].Cluster)
+
+	avg, err := testStorage.GetNamespaceCostSummary(context.Background(), "us", "shop", 30)
+	require.NoError(t, err)
+	assert.InDelta(t, 70.0, avg, 0.01, "the other cluster's namespace of the same name is not counted")
+
+	all, err := testStorage.GetLatestActualsForNamespace(context.Background(), "", "shop")
+	require.NoError(t, err)
+	assert.Len(t, all, 2, "without a cluster, every cluster's records are read")
+}
+
+func TestNamespaces_RecordsWithoutClusterMatchAny(t *testing.T) {
+	truncate(t)
+
+	now := time.Now().UTC().Truncate(time.Second)
+	require.NoError(t, testStorage.SaveActual(context.Background(), &models.CostActual{
+		ID: "old", ApplicationName: "web", ApplicationNamespace: "argocd", DeploymentNamespace: "shop", SyncTimestamp: now, MeasuredAt: now, TotalMonthlyCost: 10,
+	}))
+
+	apps, err := testStorage.GetLatestActualsForNamespace(context.Background(), "eu", "shop")
+	require.NoError(t, err)
+	assert.Len(t, apps, 1, "a record from before the cluster was stored belongs to whichever cluster is asked")
+}
+
+func TestMigration011_AddsCluster(t *testing.T) {
+	db, m := newDatabaseAt(t, 10)
+	exec(t, db, `INSERT INTO cost_actuals (id, application_name, application_namespace, sync_timestamp, measured_at, total_monthly_cost)
+VALUES ('old', 'web', 'argocd', '2026-10-01 10:00:00', '2026-10-01 10:05:00', 1)`)
+
+	require.NoError(t, m.Migrate(11))
+	var cluster string
+	require.NoError(t, db.QueryRowContext(context.Background(), "SELECT cluster FROM cost_actuals WHERE id = 'old'").Scan(&cluster))
+	assert.Equal(t, "", cluster, "an existing record has no cluster")
+	exec(t, db, `INSERT INTO cost_actuals (id, application_name, application_namespace, sync_timestamp, measured_at, total_monthly_cost, cluster)
+VALUES ('new', 'api', 'argocd', '2026-10-02 10:00:00', '2026-10-02 10:00:00', 1, 'eu')`)
+
+	require.NoError(t, m.Migrate(10))
 	var count int
 	require.NoError(t, db.QueryRowContext(context.Background(), "SELECT count(*) FROM cost_actuals").Scan(&count))
 	assert.Equal(t, 2, count, "down keeps every record")
