@@ -158,6 +158,10 @@ func NewClient(baseURL string, timeout time.Duration, logger *log.Logger, opts .
 type AllocationResponse struct {
 	Code int                         `json:"code"`
 	Data []map[string]AllocationData `json:"data"`
+
+	// windowStart and windowEnd are the window the response was asked for, when the client set them
+	// (measuredPeriod).
+	windowStart, windowEnd time.Time
 }
 
 // AllocationProperties mirrors OpenCost's AllocationProperties struct.
@@ -226,6 +230,34 @@ type AllocationData struct {
 	// countShared adds SharedCost to what the allocation costs. Set when the request asked for costs to
 	// be shared (see Client.countShared); otherwise SharedCost is only reported, as before.
 	countShared bool
+}
+
+// UnmarshalJSON reads an allocation with its cost adjustments folded into the costs they adjust.
+// Kubecost reconciles its estimates with the cloud bill and reports the correction beside each cost
+// (cpuCostAdjustment, networkCostAdjustment, ...) rather than in it: a pod's cross-zone network
+// cost of $2.99 carries an adjustment of -$2.99 when the provider did not charge for it, and the
+// cost shown in Kubecost's own views, totalCost included, is the sum of the two.
+func (a *AllocationData) UnmarshalJSON(data []byte) error {
+	type plain AllocationData
+	aux := struct {
+		*plain
+		CPUAdjustment     float64 `json:"cpuCostAdjustment"`
+		GPUAdjustment     float64 `json:"gpuCostAdjustment"`
+		RAMAdjustment     float64 `json:"ramCostAdjustment"`
+		PVAdjustment      float64 `json:"pvCostAdjustment"`
+		NetworkAdjustment float64 `json:"networkCostAdjustment"`
+		LBAdjustment      float64 `json:"loadBalancerCostAdjustment"`
+	}{plain: (*plain)(a)}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	a.CPUCost += aux.CPUAdjustment
+	a.GPUCost += aux.GPUAdjustment
+	a.RAMCost += aux.RAMAdjustment
+	a.PVCost += aux.PVAdjustment
+	a.NetworkCost += aux.NetworkAdjustment
+	a.LoadBalancerCost += aux.LBAdjustment
+	return nil
 }
 
 // PVAllocation is the cost of one volume within an allocation.
@@ -381,6 +413,12 @@ func (c *Client) prepare(ctx context.Context, params url.Values, daily bool) {
 
 type clusterKey struct{}
 
+// ClusterIn is the cluster WithCluster put in ctx, empty when there is none.
+func ClusterIn(ctx context.Context) string {
+	id, _ := ctx.Value(clusterKey{}).(string)
+	return id
+}
+
 // WithCluster has the queries made with the returned context read one cluster of a Kubecost aggregator,
 // instead of the client's own. An empty id leaves ctx as it is.
 func WithCluster(ctx context.Context, id string) context.Context {
@@ -388,6 +426,12 @@ func WithCluster(ctx context.Context, id string) context.Context {
 		return ctx
 	}
 	return context.WithValue(ctx, clusterKey{}, id)
+}
+
+// ClusterOf is the cluster a query made with ctx reads: the one WithCluster named, else the client's
+// own. It is empty for a backend that measures only its own cluster.
+func (c *Client) ClusterOf(ctx context.Context) string {
+	return c.clusterOf(ctx)
 }
 
 // clusterOf is the cluster a Kubecost query reads: the one ctx names, else the client's own.
@@ -448,7 +492,15 @@ const MinMeasuredPeriod = 5 * time.Minute
 // claimed volumes that no pod mounts are left out: OpenCost dates that entry from the start of the
 // window, whenever the volumes were created, so a namespace a few minutes old would be projected as
 // if it had run all day, far below its own applications. Their cost still counts.
+//
+// When any pod ended before the end of the window it was asked for, the period is that whole
+// window: pods that came and went, such as the jobs an Airflow worker launches, say nothing about
+// how long their application has existed, and projecting their seconds of life onto a month would
+// price them as if they ran for it. That holds while one of them happens to be running now: the span
+// from the first job to the present is then an hour or two, not the application's age. Only when every
+// pod is still running does the earliest start date a young application.
 func measuredPeriod(resp AllocationResponse) (start, end time.Time) {
+	ended := false
 	for _, allocations := range resp.Data {
 		for key, alloc := range allocations {
 			if isVirtualAllocation(key) || isUnmountedVolumes(alloc) {
@@ -460,7 +512,13 @@ func measuredPeriod(resp AllocationResponse) (start, end time.Time) {
 			if alloc.End.After(end) {
 				end = alloc.End
 			}
+			if !resp.windowEnd.IsZero() && !alloc.End.IsZero() && !alloc.End.After(resp.windowEnd.Add(-MinMeasuredPeriod)) {
+				ended = true
+			}
 		}
+	}
+	if !start.IsZero() && ended && !resp.windowStart.IsZero() && resp.windowEnd.After(resp.windowStart) {
+		return resp.windowStart, resp.windowEnd
 	}
 	return start, end
 }
@@ -529,6 +587,7 @@ func (c *Client) GetNamespaceCost(ctx context.Context, namespace string) (*model
 	}
 	c.countShared(&result)
 	c.shareNamespacesInCluster(ctx, &result, namespace, params.Get("window"), false)
+	result.windowStart, result.windowEnd = startTime, endTime
 
 	metrics := parseOpenCostResponse(result, startTime, endTime)
 	return metrics, nil
@@ -680,6 +739,7 @@ func (c *Client) podAllocations(ctx context.Context, namespace string, startTime
 	}
 	c.countShared(&result)
 	c.shareNamespacesInCluster(ctx, &result, namespace, params.Get("window"), false)
+	result.windowStart, result.windowEnd = startTime, endTime
 
 	pods := &PodAllocations{resp: result, start: startTime, end: endTime, namespace: namespace, groupLabels: c.groupLabels}
 	pods.volumeCosts = unmountedVolumeCosts(result, namespace)
@@ -1012,7 +1072,7 @@ func (p *PodAllocations) owned(resources models.ManagedResources) AllocationResp
 // namespace's only application (sole) also owns its pods without a controller that carry an unowned pod
 // label: with several applications each would claim them.
 func ownedAllocations(resp AllocationResponse, namespace string, resources models.ManagedResources, sole bool) AllocationResponse {
-	owned := AllocationResponse{Code: resp.Code, Data: make([]map[string]AllocationData, 0, len(resp.Data))}
+	owned := AllocationResponse{Code: resp.Code, Data: make([]map[string]AllocationData, 0, len(resp.Data)), windowStart: resp.windowStart, windowEnd: resp.windowEnd}
 	for _, allocations := range resp.Data {
 		kept := make(map[string]AllocationData)
 		for key, alloc := range allocations {
@@ -1569,15 +1629,28 @@ func ownedControllers(resp AllocationResponse, namespace string, resources model
 	return owned
 }
 
+// maxDailySpan is the longest a bucket of a daily series may cover. Kubecost consolidates what it
+// keeps: hourly data for the last days, then one entry per day, then one per month. Asked for a
+// day (step=1d) over a period it has only consolidated, it answers with an entry covering the whole
+// period, which must not be stored as the cost of its first day.
+const maxDailySpan = 25 * time.Hour
+
 func parseDailyTimeSeries(resp AllocationResponse) []models.DailyCost {
 	dailyCosts := make([]models.DailyCost, 0, len(resp.Data))
 
 	for _, allocations := range resp.Data {
 		var date string
+		var first, last time.Time
 		var totalCPU, totalMem, totalNetwork, totalStorage, totalCost float64
 		for _, alloc := range allocations {
 			if date == "" && !alloc.Start.IsZero() {
 				date = alloc.Start.UTC().Format("2006-01-02")
+			}
+			if !alloc.Start.IsZero() && (first.IsZero() || alloc.Start.Before(first)) {
+				first = alloc.Start
+			}
+			if alloc.End.After(last) {
+				last = alloc.End
 			}
 			totalCPU += alloc.CPUCost
 			totalMem += alloc.RAMCost
@@ -1585,7 +1658,7 @@ func parseDailyTimeSeries(resp AllocationResponse) []models.DailyCost {
 			totalStorage += alloc.PVCost
 			totalCost += alloc.componentCost()
 		}
-		if date == "" {
+		if date == "" || last.Sub(first) > maxDailySpan {
 			continue
 		}
 
@@ -1622,6 +1695,9 @@ func parsePodBreakdown(resp AllocationResponse) []models.PodCost {
 			if existing, ok := podMap[name]; ok {
 				existing.CPUCost += alloc.CPUCost
 				existing.RAMCost += alloc.RAMCost
+				existing.StorageCost += alloc.PVCost
+				existing.NetworkCost += alloc.NetworkCost + alloc.LoadBalancerCost
+				existing.GPUCost += alloc.GPUCost
 				existing.SharedCost += alloc.countedShared()
 				existing.TotalCost += alloc.componentCost()
 			} else {
@@ -1632,6 +1708,9 @@ func parsePodBreakdown(resp AllocationResponse) []models.PodCost {
 					ControllerKind: alloc.Properties.ControllerKind,
 					CPUCost:        alloc.CPUCost,
 					RAMCost:        alloc.RAMCost,
+					StorageCost:    alloc.PVCost,
+					NetworkCost:    alloc.NetworkCost + alloc.LoadBalancerCost,
+					GPUCost:        alloc.GPUCost,
 					SharedCost:     alloc.countedShared(),
 					TotalCost:      alloc.componentCost(),
 				}
@@ -1651,6 +1730,9 @@ func parsePodBreakdown(resp AllocationResponse) []models.PodCost {
 			ControllerKind: p.ControllerKind,
 			CPUCost:        p.CPUCost * monthlyMultiplier,
 			RAMCost:        p.RAMCost * monthlyMultiplier,
+			StorageCost:    p.StorageCost * monthlyMultiplier,
+			NetworkCost:    p.NetworkCost * monthlyMultiplier,
+			GPUCost:        p.GPUCost * monthlyMultiplier,
 			SharedCost:     p.SharedCost * monthlyMultiplier,
 			TotalCost:      p.TotalCost * monthlyMultiplier,
 		})

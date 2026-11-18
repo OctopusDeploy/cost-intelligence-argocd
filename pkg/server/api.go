@@ -215,6 +215,12 @@ func (s *CostAPIServer) selectCluster(next http.Handler) http.Handler {
 	})
 }
 
+// requestCluster is the cluster ?cluster= named on a cluster-wide request, by its id in the cost
+// backend; empty when the request names none, and it then reads the namespaces of every cluster.
+func (s *CostAPIServer) requestCluster(ctx context.Context) string {
+	return opencost.ClusterIn(ctx)
+}
+
 // WithScope says which cluster of the cost backend each Application is measured in.
 func WithScope(scope exporter.Scope) Option {
 	return func(s *CostAPIServer) { s.scope = scope }
@@ -319,6 +325,7 @@ func (s *CostAPIServer) setupRoutes() {
 			r.Post("/cloud-estimate", appScoped(s.handlePostCloudEstimate))
 			r.Get("/trend", appScoped(s.handleGetCostTrend))
 			r.Get("/daily", appScoped(s.handleGetDailyCosts))
+			r.Get("/month", appScoped(s.handleGetMonth))
 			r.Get("/orphaned-pods", appScoped(s.handleGetAppOrphanedPods))
 			r.Get("/rightsizing", appScoped(s.handleGetRightsizing))
 		})
@@ -647,7 +654,7 @@ func (s *CostAPIServer) handleGetNamespaceSummary(w http.ResponseWriter, r *http
 	}
 
 	ctx := r.Context()
-	avgCost, err := s.costStorage.GetNamespaceCostSummary(ctx, namespace, days)
+	avgCost, err := s.costStorage.GetNamespaceCostSummary(ctx, s.requestCluster(ctx), namespace, days)
 	if err != nil {
 		s.logger.Printf("Error retrieving namespace summary for %s: %v\n", namespace, err)
 		render.Status(r, http.StatusInternalServerError)
@@ -736,6 +743,42 @@ func (s *CostAPIServer) handleGetDailyCosts(w http.ResponseWriter, r *http.Reque
 	render.JSON(w, r, body)
 }
 
+// GET /api/cost-analysis/{appName}/month
+// Returns what the application has cost so far this calendar month (UTC) and what the month will
+// cost at the run rate of its last complete days, the figure AWS bills at month end. Both come from
+// the daily history, so pods that no longer exist count. Without any history the answer is
+// available: false.
+func (s *CostAPIServer) handleGetMonth(w http.ResponseWriter, r *http.Request, app models.AppRef) {
+	namespace, resources, ok := s.appTarget(w, r, app)
+	if !ok {
+		return
+	}
+
+	now := time.Now()
+	ctx, _ := s.placement(r.Context(), app)
+	target := history.Target{App: app, Namespace: namespace, Resources: resources}
+	dailyCosts, err := history.Daily(ctx, s.costStorage, s.opencostCli, target, history.MonthFrom(now), now)
+	if err != nil {
+		s.logger.Printf("Error retrieving month cost for %s (namespace %s): %v\n", app, namespace, err)
+		render.Status(r, http.StatusInternalServerError)
+		render.JSON(w, r, map[string]string{"error": "failed to retrieve month cost"})
+		return
+	}
+
+	body := map[string]any{
+		"applicationName": app.Name,
+		"namespace":       namespace,
+		"scope":           models.ScopeOf(resources),
+		"available":       false,
+	}
+	if month, ok := history.SummariseMonth(dailyCosts, now); ok {
+		body["available"] = true
+		body["month"] = month
+	}
+	w.Header().Set("Content-Type", "application/json")
+	render.JSON(w, r, body)
+}
+
 // dailyRange reads the UTC days a /daily request asks for, both included: ?from= through ?to=
 // (YYYY-MM-DD) when given, the last ?days= days up to today otherwise. It returns the number of days
 // covered, or a message saying why the request is invalid.
@@ -792,10 +835,16 @@ func (s *CostAPIServer) handleListNamespaces(w http.ResponseWriter, r *http.Requ
 	render.JSON(w, r, map[string]any{"namespaces": namespaces})
 }
 
-// nameClusters sets, on each namespace, the clusters the live Applications deploying there run on, so
-// the page can filter namespaces by cluster. Stored costs are not tagged with one. It does nothing
-// when the backend measures a single cluster or the Applications can't be listed.
+// nameClusters sets, on each namespace, the clusters it runs on, so the page can filter namespaces by
+// cluster: the cluster its cost was measured in when stored, else (records from before it was stored)
+// those the live Applications deploying there run on. The latter does nothing when the backend
+// measures a single cluster or the Applications can't be listed.
 func (s *CostAPIServer) nameClusters(ctx context.Context, namespaces []models.NamespaceSummary) {
+	for i := range namespaces {
+		if namespaces[i].Cluster != "" {
+			namespaces[i].Clusters = []string{namespaces[i].Cluster}
+		}
+	}
 	choices := s.choices()
 	if s.applications == nil || len(choices) < 2 {
 		return
@@ -824,6 +873,9 @@ func (s *CostAPIServer) nameClusters(ctx context.Context, namespaces []models.Na
 		byNamespace[a.Destination.Namespace][id] = true
 	}
 	for i := range namespaces {
+		if namespaces[i].Cluster != "" {
+			continue
+		}
 		for id := range byNamespace[namespaces[i].Namespace] {
 			namespaces[i].Clusters = append(namespaces[i].Clusters, id)
 		}
@@ -837,7 +889,7 @@ func (s *CostAPIServer) handleGetNamespaceApps(w http.ResponseWriter, r *http.Re
 	ns := chi.URLParam(r, "ns")
 	ctx := r.Context()
 
-	apps, err := s.costStorage.GetLatestActualsForNamespace(ctx, ns)
+	apps, err := s.costStorage.GetLatestActualsForNamespace(ctx, s.requestCluster(ctx), ns)
 	if err != nil {
 		s.logger.Printf("Error retrieving apps for namespace %s: %v\n", ns, err)
 		render.Status(r, http.StatusInternalServerError)

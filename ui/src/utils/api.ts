@@ -42,6 +42,11 @@ export interface PodCost {
   controllerKind: string;
   cpuCost: number;
   ramCost: number;
+  // storageCost, networkCost (load balancers included) and gpuCost are the rest of what the pod costs
+  // besides CPU and memory. Absent on records stored before they were kept.
+  storageCost?: number;
+  networkCost?: number;
+  gpuCost?: number;
   // sharedCost is the part of totalCost that is shared cost spread over the pod, not its own usage.
   sharedCost?: number;
   totalCost: number;
@@ -163,6 +168,26 @@ export interface DailyCostData {
   maxGranularity?: 'week';
 }
 
+export interface MonthCost {
+  // The calendar month (UTC), "2026-11".
+  month: string;
+  // What the application has cost from the 1st through today, pods that no longer exist included.
+  toDate: number;
+  // toDate plus the rest of the month at the run rate of the last complete days.
+  projected: number;
+  dailyRunRate: number;
+  runRateDays: number;
+  daysElapsed: number;
+  daysInMonth: number;
+}
+
+export interface MonthCostData {
+  applicationName: string;
+  namespace: string;
+  available: boolean;
+  month?: MonthCost;
+}
+
 export interface AppContext {
   namespace: string;
   name: string;
@@ -171,6 +196,9 @@ export interface AppContext {
 
 export interface NamespaceSummary {
   namespace: string;
+  // cluster is the cluster the namespace was measured in, in the cost backend's name. Absent when the
+  // backend measures a single cluster, and for costs stored before it was recorded.
+  cluster?: string;
   // totalCost and idleCost come from the namespace's most recent measurement, counted once. idleCost
   // is null when that measurement predates it, until an application in the namespace syncs again.
   totalCost: number;
@@ -591,6 +619,18 @@ class CostIntelligenceAPI {
       console.error('Failed to fetch daily costs:', error);
       throw error;
     }
+  }
+
+  async getMonthCost(appName: string, ctx?: AppContext): Promise<MonthCostData | null> {
+    const response = await fetch(
+      `${this.baseUrl}/api/cost-analysis/${encodeURIComponent(appName)}/month`,
+      { headers: this.headers(ctx) }
+    );
+    if (!response.ok) {
+      if (response.status === 404) return null;
+      await this.throwWithBody(response);
+    }
+    return await response.json();
   }
 
   async listNamespaces(): Promise<NamespaceSummary[]> {

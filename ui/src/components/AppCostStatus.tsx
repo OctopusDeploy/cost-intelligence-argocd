@@ -41,7 +41,7 @@ const AppCostStatusItem: React.FC<Props> = ({ application }) => {
   const measuredClusters = useMeasuredClusters(deploysElsewhere);
   const remote = deploysElsewhere && (measuredClusters === null || otherCluster(destination, measuredClusters) !== null);
 
-  const { data, dailyCosts } = useCostData(remote ? undefined : name, appCtx, true, 60000);
+  const { data, dailyCosts, month } = useCostData(remote ? undefined : name, appCtx, true, 60000);
   if (remote || !data) return null;
 
   const latest = asApplication(data, managed);
@@ -55,6 +55,10 @@ const AppCostStatusItem: React.FC<Props> = ({ application }) => {
   ]
     .filter(Boolean)
     .join(', ');
+  // The calendar month, which is what the cloud bill covers: cost so far, and the month at the run rate.
+  const monthLine = month
+    ? `${formatMoney(month.toDate)} so far this month, ${formatMoney(month.projected)} projected`
+    : null;
 
   // Without enough history the trend is unknown, and the icon stays green.
   const summary = dailyCosts ? summarizeCostTrend(dailyCosts, TREND_WINDOW_DAYS) : null;
@@ -87,6 +91,15 @@ const AppCostStatusItem: React.FC<Props> = ({ application }) => {
       <div className="application-status-panel__item-name" style={{ margin: '0 0 0.5em' }}>
         {detail}
       </div>
+      {monthLine && (
+        <div
+          className="application-status-panel__item-name"
+          title="Cost recorded from the 1st of the month (UTC) through today, and the month at the average daily cost of the last 7 days"
+          style={{ margin: '0 0 0.5em' }}
+        >
+          {monthLine}
+        </div>
+      )}
     </div>
   );
 };

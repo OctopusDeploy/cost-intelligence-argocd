@@ -26,6 +26,9 @@ describe('ControllerCostTable', () => {
             pods: [pod('web-1'), pod('web-2')],
             cpuCost: 0.087,
             ramCost: 0.087,
+            storageCost: 0,
+            networkCost: 0,
+            gpuCost: 0,
             sharedCost: 0,
             totalCost: 0.174,
             share: 1,
@@ -56,6 +59,9 @@ describe('ControllerCostTable', () => {
       pods: [{ ...pod('web-1'), sharedCost }],
       cpuCost: 10,
       ramCost: 5,
+      storageCost: 0,
+      networkCost: 0,
+      gpuCost: 0,
       sharedCost,
       totalCost: 15 + sharedCost,
       share: 1,
@@ -69,5 +75,34 @@ describe('ControllerCostTable', () => {
     expect(screen.getByRole('columnheader', { name: 'Shared' })).toBeTruthy();
     const cells = within(screen.getAllByRole('row')[1]).getAllByRole('cell').map(cell => cell.textContent);
     expect(cells.filter(text => text?.startsWith('$'))).toEqual(['$10.00', '$5.00', '$7.50', '$22.50']);
+  });
+
+  it('adds Storage and Network columns so the cells add up to the total', () => {
+    const data = { ...pod('web-1'), cpuCost: 10, ramCost: 5, storageCost: 4, networkCost: 1, totalCost: 20 };
+    render(
+      <ControllerCostTable
+        groups={[
+          {
+            key: 'Deployment/web',
+            kind: 'Deployment',
+            name: 'web',
+            pods: [data],
+            cpuCost: 10,
+            ramCost: 5,
+            storageCost: 4,
+            networkCost: 1,
+            gpuCost: 0,
+            sharedCost: 0,
+            totalCost: 20,
+            share: 1,
+          },
+        ]}
+      />
+    );
+    expect(screen.getByRole('columnheader', { name: 'Storage' })).toBeTruthy();
+    expect(screen.getByRole('columnheader', { name: 'Network' })).toBeTruthy();
+    expect(screen.queryByRole('columnheader', { name: 'GPU' })).toBeNull();
+    const cells = within(screen.getAllByRole('row')[1]).getAllByRole('cell').map(cell => cell.textContent);
+    expect(cells.filter(text => text?.startsWith('$'))).toEqual(['$10.00', '$5.00', '$4.00', '$1.00', '$20.00']);
   });
 });

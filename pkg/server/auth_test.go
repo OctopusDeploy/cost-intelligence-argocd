@@ -42,6 +42,7 @@ var appScopedRoutes = []struct{ method, path string }{
 	{http.MethodGet, "/api/cost-analysis/redis/actual"},
 	{http.MethodGet, "/api/cost-analysis/redis/trend"},
 	{http.MethodGet, "/api/cost-analysis/redis/daily"},
+	{http.MethodGet, "/api/cost-analysis/redis/month"},
 	{http.MethodGet, "/api/cost-analysis/redis/orphaned-pods"},
 	{http.MethodGet, "/api/cost-analysis/redis/rightsizing"},
 	{http.MethodPost, "/api/cost-analysis/redis/cloud-estimate"},

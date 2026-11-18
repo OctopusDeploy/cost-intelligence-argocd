@@ -71,7 +71,7 @@ func (m *mockStorage) GetActualsInDateRange(ctx context.Context, app models.AppR
 	return nil, nil
 }
 
-func (m *mockStorage) GetNamespaceCostSummary(ctx context.Context, namespace string, days int) (float64, error) {
+func (m *mockStorage) GetNamespaceCostSummary(ctx context.Context, _, namespace string, days int) (float64, error) {
 	if m.getNamespaceCostSummaryFn != nil {
 		return m.getNamespaceCostSummaryFn(ctx, namespace, days)
 	}
@@ -85,7 +85,7 @@ func (m *mockStorage) ListNamespaces(ctx context.Context) ([]models.NamespaceSum
 	return nil, nil
 }
 
-func (m *mockStorage) GetLatestActualsForNamespace(ctx context.Context, namespace string) ([]models.CostActual, error) {
+func (m *mockStorage) GetLatestActualsForNamespace(ctx context.Context, _, namespace string) ([]models.CostActual, error) {
 	if m.getLatestActualsForNamespaceFn != nil {
 		return m.getLatestActualsForNamespaceFn(ctx, namespace)
 	}

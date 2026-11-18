@@ -4,13 +4,34 @@ import { cardStyle, Tokens, useTokens } from '../theme/tokens';
 import { formatMoney, formatPercent, roundColumns, roundParts } from '../utils/format';
 import { NAME_COLUMN, SPACER_COLUMN } from '../utils/layout';
 import { ControllerGroup } from '../utils/podGroups';
+import { PodCost } from '../utils/api';
 
-// Expand, controller, kind, pods, CPU, memory, (shared,) total, share, then a spacer. The controller name
-// grows to 480px and the spacer takes any width beyond that (see NAME_COLUMN). The shared column is
-// there only when shared cost is counted in the totals.
-const columns = (shared: boolean) =>
-  `48px ${NAME_COLUMN} 112px 56px 104px 104px ${shared ? '104px ' : ''}104px 132px ${SPACER_COLUMN}`;
+// Expand, controller, kind, pods, CPU, memory, (GPU, storage, network, shared,) total, share, then a spacer.
+// The controller name grows to 480px and the spacer takes any width beyond that (see NAME_COLUMN). An
+// optional column is there only when some controller has that cost, so the cells beside a total add up
+// to it.
+const columns = (optional: number) =>
+  `48px ${NAME_COLUMN} 112px 56px 104px 104px ${'104px '.repeat(optional)}104px 132px ${SPACER_COLUMN}`;
 const MIN_TABLE_WIDTH = '820px';
+
+interface OptionalColumn {
+  label: string;
+  title: string;
+  group: (group: ControllerGroup) => number;
+  pod: (pod: PodCost) => number;
+}
+
+const OPTIONAL_COLUMNS: OptionalColumn[] = [
+  { label: 'GPU', title: 'GPU cost', group: g => g.gpuCost, pod: p => p.gpuCost ?? 0 },
+  { label: 'Storage', title: 'Persistent volume cost', group: g => g.storageCost, pod: p => p.storageCost ?? 0 },
+  { label: 'Network', title: 'Network and load balancer cost', group: g => g.networkCost, pod: p => p.networkCost ?? 0 },
+  {
+    label: 'Shared',
+    title: "Cost shared across the cluster, not this controller's own usage",
+    group: g => g.sharedCost,
+    pod: p => p.sharedCost ?? 0,
+  },
+];
 
 const plural = (count: number, noun: string) => `${count} ${noun}${count === 1 ? '' : 's'}`;
 
@@ -25,7 +46,7 @@ export const ControllerCostTable: React.FC<Props> = ({ groups }) => {
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
   const total = groups.reduce((sum, group) => sum + group.totalCost, 0);
   const podCount = groups.reduce((sum, group) => sum + group.pods.length, 0);
-  const hasShared = groups.some(group => group.sharedCost > 0);
+  const shown = OPTIONAL_COLUMNS.filter(column => groups.some(group => column.group(group) > 0));
 
   const toggle = (key: string) =>
     setExpanded(current => {
@@ -36,7 +57,7 @@ export const ControllerCostTable: React.FC<Props> = ({ groups }) => {
 
   const row: React.CSSProperties = {
     display: 'grid',
-    gridTemplateColumns: columns(hasShared),
+    gridTemplateColumns: columns(shown.length),
     alignItems: 'center',
     color: t.text,
     fontSize: '13px',
@@ -82,11 +103,11 @@ export const ControllerCostTable: React.FC<Props> = ({ groups }) => {
               <span role="columnheader" style={numeric}>
                 Memory
               </span>
-              {hasShared && (
-                <span role="columnheader" style={numeric} title="Cost shared across the cluster, not this controller's own usage">
-                  Shared
+              {shown.map(column => (
+                <span key={column.label} role="columnheader" style={numeric} title={column.title}>
+                  {column.label}
                 </span>
-              )}
+              ))}
               <span role="columnheader" style={numeric}>
                 Total
               </span>
@@ -101,8 +122,8 @@ export const ControllerCostTable: React.FC<Props> = ({ groups }) => {
             const groupId = `cost-intel-controller-${index}`;
             // Rounded so the cells beside each total add up to it, and the pods to their controller.
             const [groupTotal] = roundParts([group.totalCost]);
-            const [groupCpu, groupRam, groupShared = 0] = roundColumns(
-              hasShared ? [group.cpuCost, group.ramCost, group.sharedCost] : [group.cpuCost, group.ramCost],
+            const [groupCpu, groupRam, ...groupOptional] = roundColumns(
+              [group.cpuCost, group.ramCost, ...shown.map(column => column.group(group))],
               group.totalCost,
               groupTotal
             );
@@ -153,11 +174,11 @@ export const ControllerCostTable: React.FC<Props> = ({ groups }) => {
                   <span role="cell" style={numeric}>
                     {formatMoney(groupRam)}
                   </span>
-                  {hasShared && (
-                    <span role="cell" style={numeric}>
-                      {formatMoney(groupShared)}
+                  {shown.map((column, i) => (
+                    <span key={column.label} role="cell" style={numeric}>
+                      {formatMoney(groupOptional[i])}
                     </span>
-                  )}
+                  ))}
                   <span role="cell" style={{ ...numeric, color: t.textStrong, fontWeight: 500 }}>
                     {formatMoney(groupTotal)}
                   </span>
@@ -169,8 +190,8 @@ export const ControllerCostTable: React.FC<Props> = ({ groups }) => {
                 {open &&
                   group.pods.map((pod, podIndex) => {
                     const podTotal = podTotals[podIndex];
-                    const [podCpu, podRam, podShared = 0] = roundColumns(
-                      hasShared ? [pod.cpuCost, pod.ramCost, pod.sharedCost ?? 0] : [pod.cpuCost, pod.ramCost],
+                    const [podCpu, podRam, ...podOptional] = roundColumns(
+                      [pod.cpuCost, pod.ramCost, ...shown.map(column => column.pod(pod))],
                       pod.totalCost,
                       podTotal
                     );
@@ -194,11 +215,11 @@ export const ControllerCostTable: React.FC<Props> = ({ groups }) => {
                         <span role="cell" style={numeric}>
                           {formatMoney(podRam)}
                         </span>
-                        {hasShared && (
-                          <span role="cell" style={numeric}>
-                            {formatMoney(podShared)}
+                        {shown.map((column, i) => (
+                          <span key={column.label} role="cell" style={numeric}>
+                            {formatMoney(podOptional[i])}
                           </span>
-                        )}
+                        ))}
                         <span role="cell" style={numeric}>
                           {formatMoney(podTotal)}
                         </span>

@@ -129,8 +129,8 @@ func (p *PostgresCostStorage) SaveActual(ctx context.Context, actual *models.Cos
 	(id, application_name, application_namespace, deployment_namespace, sync_timestamp, measured_at,
 	 total_monthly_cost, estimate_accuracy, estimate_vs_actual,
 	 resources_json, opencost_output_json, efficiency_json, pods_json, app_json, measured_on,
-	 idle_monthly_cost)
-	VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+	 idle_monthly_cost, cluster)
+	VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
 	ON CONFLICT (id) DO UPDATE SET
 		total_monthly_cost = EXCLUDED.total_monthly_cost,
 		estimate_accuracy = EXCLUDED.estimate_accuracy,
@@ -141,6 +141,7 @@ func (p *PostgresCostStorage) SaveActual(ctx context.Context, actual *models.Cos
 		pods_json = EXCLUDED.pods_json,
 		app_json = EXCLUDED.app_json,
 		idle_monthly_cost = EXCLUDED.idle_monthly_cost,
+		cluster = EXCLUDED.cluster,
 		deployment_namespace = EXCLUDED.deployment_namespace,
 		measured_at = EXCLUDED.measured_at
 	`
@@ -165,11 +166,11 @@ func (p *PostgresCostStorage) SaveFirstActual(ctx context.Context, actual *model
 	(id, application_name, application_namespace, deployment_namespace, sync_timestamp, measured_at,
 	 total_monthly_cost, estimate_accuracy, estimate_vs_actual,
 	 resources_json, opencost_output_json, efficiency_json, pods_json, app_json, measured_on,
-	 idle_monthly_cost)
+	 idle_monthly_cost, cluster)
 	SELECT $1::varchar, $2::varchar, $3::varchar, $4::varchar, $5::timestamp, $6::timestamp,
 	       $7::numeric, $8::numeric, $9::numeric,
 	       $10::jsonb, $11::jsonb, $12::jsonb, $13::jsonb, $14::jsonb, $15::varchar,
-	       $16::numeric
+	       $16::numeric, $17::varchar
 	WHERE NOT EXISTS (
 	    SELECT 1 FROM cost_actuals WHERE application_namespace = $3 AND application_name = $2
 	)
@@ -199,11 +200,11 @@ func (p *PostgresCostStorage) SaveActualUnlessSuperseded(ctx context.Context, ac
 	(id, application_name, application_namespace, deployment_namespace, sync_timestamp, measured_at,
 	 total_monthly_cost, estimate_accuracy, estimate_vs_actual,
 	 resources_json, opencost_output_json, efficiency_json, pods_json, app_json, measured_on,
-	 idle_monthly_cost)
+	 idle_monthly_cost, cluster)
 	SELECT $1::varchar, $2::varchar, $3::varchar, $4::varchar, $5::timestamp, $6::timestamp,
 	       $7::numeric, $8::numeric, $9::numeric,
 	       $10::jsonb, $11::jsonb, $12::jsonb, $13::jsonb, $14::jsonb, $15::varchar,
-	       $16::numeric
+	       $16::numeric, $17::varchar
 	WHERE NOT EXISTS (
 	    SELECT 1 FROM cost_actuals
 	    WHERE application_namespace = $3 AND application_name = $2
@@ -281,6 +282,7 @@ func actualColumns(actual *models.CostActual) ([]any, error) {
 		appJSON,
 		measuredOn,
 		actual.IdleMonthlyCost,
+		actual.Cluster,
 	}, nil
 }
 
@@ -288,7 +290,7 @@ func (p *PostgresCostStorage) GetLatestActual(ctx context.Context, app models.Ap
 	query := `
 	SELECT id, application_name, application_namespace, deployment_namespace, sync_timestamp, measured_on, measured_at,
 		   total_monthly_cost, estimate_accuracy, estimate_vs_actual,
-		   resources_json, opencost_output_json, efficiency_json, pods_json, app_json, idle_monthly_cost
+		   resources_json, opencost_output_json, efficiency_json, pods_json, app_json, idle_monthly_cost, cluster
 	FROM cost_actuals
 	WHERE application_namespace = $1 AND application_name = $2
 	ORDER BY measured_at DESC
@@ -315,6 +317,7 @@ func (p *PostgresCostStorage) GetLatestActual(ctx context.Context, app models.Ap
 		&podsJSON,
 		&appJSON,
 		&actual.IdleMonthlyCost,
+		&actual.Cluster,
 	)
 
 	if errors.Is(err, sql.ErrNoRows) {
@@ -379,7 +382,7 @@ func (p *PostgresCostStorage) GetActualsInDateRange(ctx context.Context, app mod
 	query := `
 	SELECT id, application_name, application_namespace, deployment_namespace, sync_timestamp, measured_on, measured_at,
 		   total_monthly_cost, estimate_accuracy, estimate_vs_actual,
-		   resources_json, opencost_output_json, efficiency_json, pods_json, app_json, idle_monthly_cost
+		   resources_json, opencost_output_json, efficiency_json, pods_json, app_json, idle_monthly_cost, cluster
 	FROM cost_actuals
 	WHERE application_namespace = $1 AND application_name = $2 AND measured_at BETWEEN $3 AND $4
 	ORDER BY measured_at DESC
@@ -413,6 +416,7 @@ func (p *PostgresCostStorage) GetActualsInDateRange(ctx context.Context, app mod
 			&podsJSON,
 			&appJSON,
 			&actual.IdleMonthlyCost,
+			&actual.Cluster,
 		); err != nil {
 			return nil, fmt.Errorf("failed to scan cost actual: %w", err)
 		}
@@ -449,23 +453,26 @@ func (p *PostgresCostStorage) GetActualsInDateRange(ctx context.Context, app mod
 	return actuals, rows.Err()
 }
 
-func (p *PostgresCostStorage) GetNamespaceCostSummary(ctx context.Context, namespace string, days int) (float64, error) {
+func (p *PostgresCostStorage) GetNamespaceCostSummary(ctx context.Context, cluster, namespace string, days int) (float64, error) {
 	// Every record measures its app's whole deployment namespace, so the apps sharing a namespace
 	// each record the same cost. Averaging every record would weight a day by how many apps synced
 	// on it. Each day counts once instead, at its latest measurement (OpenCost's 24h window makes
-	// that the day's best reading), and the summary is the average over those days.
+	// that the day's best reading), and the summary is the average over those days. With a cluster, only
+	// its records count: a namespace of the same name elsewhere is another namespace; without, those of
+	// every cluster do. A record from before the cluster was stored has an empty one, which matches any.
 	query := `
 	WITH daily AS (
 	    SELECT DISTINCT ON (date_trunc('day', measured_at)) total_monthly_cost
 	    FROM cost_actuals
-	    WHERE deployment_namespace = $1 AND measured_at > NOW() - INTERVAL '1 day' * $2::INTEGER
+	    WHERE deployment_namespace = $1 AND ($2::varchar = '' OR cluster IN ($2::varchar, ''))
+	      AND measured_at > NOW() - INTERVAL '1 day' * $3::INTEGER
 	    ORDER BY date_trunc('day', measured_at), measured_at DESC, id
 	)
 	SELECT COALESCE(AVG(total_monthly_cost), 0) FROM daily
 	`
 
 	var avgCost float64
-	err := p.db.QueryRowContext(ctx, query, namespace, days).Scan(&avgCost)
+	err := p.db.QueryRowContext(ctx, query, namespace, cluster, days).Scan(&avgCost)
 	if err != nil {
 		return 0, fmt.Errorf("failed to get namespace cost summary: %w", err)
 	}
@@ -478,22 +485,24 @@ func (p *PostgresCostStorage) ListNamespaces(ctx context.Context) ([]models.Name
 	// most recent measurement says; summing the records of apps that share it would count its
 	// pods once per app. Each app counts by its latest record only, so an app that moved
 	// namespaces is not counted where it used to be. An app is its Application namespace and name.
+	// A namespace is its cluster and name: two clusters can run namespaces of the same name.
 	query := `
 	WITH latest_per_app AS (
 	    SELECT DISTINCT ON (application_namespace, application_name)
-	        application_namespace, application_name, deployment_namespace, total_monthly_cost,
+	        application_namespace, application_name, cluster, deployment_namespace, total_monthly_cost,
 	        idle_monthly_cost, measured_at
 	    FROM cost_actuals
 	    WHERE deployment_namespace <> ''
 	    ORDER BY application_namespace, application_name, measured_at DESC
 	),
 	latest_per_namespace AS (
-	    SELECT DISTINCT ON (deployment_namespace)
-	        deployment_namespace, total_monthly_cost, idle_monthly_cost, measured_at
+	    SELECT DISTINCT ON (cluster, deployment_namespace)
+	        cluster, deployment_namespace, total_monthly_cost, idle_monthly_cost, measured_at
 	    FROM latest_per_app
-	    ORDER BY deployment_namespace, measured_at DESC, application_namespace, application_name
+	    ORDER BY cluster, deployment_namespace, measured_at DESC, application_namespace, application_name
 	)
 	SELECT
+	    ns.cluster,
 	    ns.deployment_namespace,
 	    ns.total_monthly_cost,
 	    ns.idle_monthly_cost,
@@ -501,11 +510,11 @@ func (p *PostgresCostStorage) ListNamespaces(ctx context.Context) ([]models.Name
 	    ns.measured_at
 	FROM latest_per_namespace ns
 	JOIN (
-	    SELECT deployment_namespace, COUNT(*) AS app_count
+	    SELECT cluster, deployment_namespace, COUNT(*) AS app_count
 	    FROM latest_per_app
-	    GROUP BY deployment_namespace
-	) apps USING (deployment_namespace)
-	ORDER BY ns.total_monthly_cost DESC, ns.deployment_namespace
+	    GROUP BY cluster, deployment_namespace
+	) apps USING (cluster, deployment_namespace)
+	ORDER BY ns.total_monthly_cost DESC, ns.deployment_namespace, ns.cluster
 	`
 
 	rows, err := p.db.QueryContext(ctx, query)
@@ -517,7 +526,7 @@ func (p *PostgresCostStorage) ListNamespaces(ctx context.Context) ([]models.Name
 	result := []models.NamespaceSummary{}
 	for rows.Next() {
 		var ns models.NamespaceSummary
-		if err := rows.Scan(&ns.Namespace, &ns.TotalCost, &ns.IdleCost, &ns.AppCount, &ns.MeasuredAt); err != nil {
+		if err := rows.Scan(&ns.Cluster, &ns.Namespace, &ns.TotalCost, &ns.IdleCost, &ns.AppCount, &ns.MeasuredAt); err != nil {
 			return nil, fmt.Errorf("failed to scan namespace row: %w", err)
 		}
 		result = append(result, ns)
@@ -526,18 +535,18 @@ func (p *PostgresCostStorage) ListNamespaces(ctx context.Context) ([]models.Name
 	return result, rows.Err()
 }
 
-func (p *PostgresCostStorage) GetLatestActualsForNamespace(ctx context.Context, namespace string) ([]models.CostActual, error) {
+func (p *PostgresCostStorage) GetLatestActualsForNamespace(ctx context.Context, cluster, namespace string) ([]models.CostActual, error) {
 	query := `
 	SELECT DISTINCT ON (application_namespace, application_name)
 	    id, application_name, application_namespace, deployment_namespace,
 	    sync_timestamp, measured_on, measured_at, total_monthly_cost,
-	    efficiency_json, pods_json, opencost_output_json, app_json
+	    efficiency_json, pods_json, opencost_output_json, app_json, cluster
 	FROM cost_actuals
-	WHERE deployment_namespace = $1
+	WHERE deployment_namespace = $1 AND ($2::varchar = '' OR cluster IN ($2::varchar, ''))
 	ORDER BY application_namespace, application_name, measured_at DESC
 	`
 
-	rows, err := p.db.QueryContext(ctx, query, namespace)
+	rows, err := p.db.QueryContext(ctx, query, namespace, cluster)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query actuals for namespace: %w", err)
 	}
@@ -561,6 +570,7 @@ func (p *PostgresCostStorage) GetLatestActualsForNamespace(ctx context.Context, 
 			&podsJSON,
 			&opencostJSON,
 			&appJSON,
+			&actual.Cluster,
 		); err != nil {
 			return nil, fmt.Errorf("failed to scan actual row: %w", err)
 		}

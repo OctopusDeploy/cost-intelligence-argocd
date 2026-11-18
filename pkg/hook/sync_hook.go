@@ -396,6 +396,7 @@ func (h *SyncHook) measureActualCosts(ctx context.Context, notification *models.
 // application deployed to it gets its cost record.
 type Namespace struct {
 	name       string
+	cluster    string
 	measuredAt time.Time
 	metrics    *models.OpenCostMetrics
 	efficiency *models.EfficiencyMetrics
@@ -459,7 +460,7 @@ func MeasureNamespace(ctx context.Context, client *opencost.Client, namespace st
 		}
 	}
 
-	measured := &Namespace{name: namespace, measuredAt: time.Now(), metrics: metrics, efficiency: er.v, pods: pr.v}
+	measured := &Namespace{name: namespace, cluster: client.ClusterOf(ctx), measuredAt: time.Now(), metrics: metrics, efficiency: er.v, pods: pr.v}
 	if !measured.HasData() {
 		logger.Printf("OpenCost has no data, or too little, for namespace %s yet\n", namespace)
 		return measured, nil
@@ -506,6 +507,7 @@ func (n *Namespace) Record(app models.AppRef, owners models.ManagedResources, sy
 		ApplicationName:      app.Name,
 		ApplicationNamespace: app.Namespace,
 		DeploymentNamespace:  n.name,
+		Cluster:              n.cluster,
 		SyncTimestamp:        syncTimestamp,
 		MeasuredAt:           n.measuredAt,
 		MeasuredOn:           measuredOn,

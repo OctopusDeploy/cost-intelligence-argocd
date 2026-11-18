@@ -89,7 +89,7 @@ const ClusterDashboard: React.FC<ClusterDashboardProps> = ({ picker, all, cluste
   const [view, setView] = useUrlState<View>('costTab', 'namespaces', VIEW_IDS);
   const [urlNamespace, setUrlNamespace] = useUrlState<string>('costNs', '');
   const loaded = useNamespaceData(urlNamespace || null);
-  // The stored costs are not tagged with a cluster; each namespace names the clusters its applications run on.
+  // Each namespace names the cluster it was measured in; one stored before that was recorded names the clusters its applications run on.
   const shown = useMemo(
     // Without the clusters named (the service could not list the applications), nothing can be filtered.
     () =>

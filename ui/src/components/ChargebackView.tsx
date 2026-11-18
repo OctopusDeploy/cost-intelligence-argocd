@@ -156,7 +156,7 @@ export const ChargebackView: React.FC<Props> = ({ namespaces }) => {
           >
             <option value="">All namespaces</option>
             {namespaces.map(ns => (
-              <option key={ns.namespace} value={ns.namespace}>
+              <option key={`${ns.cluster ?? ''}/${ns.namespace}`} value={ns.namespace}>
                 {ns.namespace}
               </option>
             ))}

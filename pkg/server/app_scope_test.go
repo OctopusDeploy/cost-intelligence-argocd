@@ -15,6 +15,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/OctopusDeploy/cost-intelligence-argocd/pkg/history"
 	"github.com/OctopusDeploy/cost-intelligence-argocd/pkg/hook"
 	"github.com/OctopusDeploy/cost-intelligence-argocd/pkg/models"
 	"github.com/OctopusDeploy/cost-intelligence-argocd/pkg/opencost"
@@ -329,6 +330,43 @@ func TestHandleGetDailyCosts_ServesRecordedDaysAndAsksOpenCostForTheRest(t *test
 	require.Len(t, got.DailyCosts, 2)
 	assert.Equal(t, yesterday, got.DailyCosts[0].Date)
 	assert.Equal(t, today.Format(time.DateOnly), got.DailyCosts[1].Date)
+}
+
+// The month is read from the recorded days, a deleted pod's cost included, with no OpenCost call for
+// the days already recorded.
+func TestHandleGetMonth_SumsTheRecordedDays(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now().UTC()
+	today := now.Truncate(24 * time.Hour)
+	yesterday := today.AddDate(0, 0, -1)
+	store := &mockStorage{
+		getLatestActualFn: func(context.Context, models.AppRef) (*models.CostActual, error) {
+			return redisRecord("r1", 9.55, 0.63, true), nil
+		},
+		getDailyProgressFn: func(context.Context, models.AppRef) (*models.DailyProgress, error) {
+			return &models.DailyProgress{Through: yesterday.Format(time.DateOnly), Scope: models.ScopeApplication}, nil
+		},
+		getDailyCostsFn: func(_ context.Context, _ models.AppRef, _, from, _ string) ([]models.DailyCost, error) {
+			return []models.DailyCost{{Date: yesterday.Format(time.DateOnly), TotalCost: 2}}, nil
+		},
+	}
+	srv := newScopedTestServer(t, store, func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(opencost.AllocationResponse{Code: 200})
+	})
+
+	var got struct {
+		Available bool          `json:"available"`
+		Month     history.Month `json:"month"`
+	}
+	getJSON(t, srv, "/api/cost-analysis/redis/month", &got)
+
+	require.True(t, got.Available)
+	assert.Equal(t, now.Format("2006-01"), got.Month.Month)
+	if yesterday.Month() == today.Month() {
+		assert.InDelta(t, 2, got.Month.ToDate, 1e-9)
+	}
+	assert.Positive(t, got.Month.Projected)
 }
 
 // stubLister answers List with vpas or err, and records the namespaces it was asked about.

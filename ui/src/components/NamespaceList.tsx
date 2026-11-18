@@ -27,7 +27,7 @@ export const NamespaceList: React.FC<Props> = ({ namespaces, selected, onSelect,
           const isSelected = ns.namespace === selected;
           const share = clusterTotal > 0 ? ns.totalCost / clusterTotal : 0;
           return (
-            <li key={ns.namespace}>
+            <li key={`${ns.cluster ?? ''}/${ns.namespace}`}>
               <button
                 type="button"
                 aria-current={isSelected ? 'true' : undefined}

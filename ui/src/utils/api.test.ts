@@ -240,6 +240,23 @@ describe('application requests', () => {
   });
 });
 
+describe('getMonthCost', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('reads the calendar month of the application', async () => {
+    const month = { month: '2026-11', toDate: 34.5, projected: 60, dailyRunRate: 2, runRateDays: 7, daysElapsed: 18, daysInMonth: 30 };
+    const fetchMock = stubFetch(url => (url.includes('/month') ? { body: { available: true, month } } : undefined));
+    const { default: api } = await loadApi();
+
+    const got = await api.getMonthCost('redis');
+
+    expect(String(fetchMock.mock.calls[0][0])).toBe('/extensions/cost-intel/api/cost-analysis/redis/month');
+    expect(got?.month?.projected).toBe(60);
+  });
+});
+
 describe('getDailyCosts', () => {
   afterEach(() => {
     vi.unstubAllGlobals();

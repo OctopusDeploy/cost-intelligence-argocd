@@ -9,6 +9,9 @@ type CostActual struct {
 	ApplicationName      string `json:"applicationName"`
 	ApplicationNamespace string `json:"applicationNamespace"`
 	DeploymentNamespace  string `json:"deploymentNamespace"`
+	// Cluster is the cluster of the cost backend the record was measured in (its id; empty when the
+	// backend measures only its own, and for records stored before it was recorded).
+	Cluster string `json:"cluster,omitempty"`
 	// SyncTimestamp is when the sync that triggered the measurement finished. Zero for a measurement
 	// taken at install, which follows no sync.
 	SyncTimestamp time.Time `json:"syncTimestamp,omitzero"`
@@ -177,7 +180,10 @@ type DataQuality struct {
 
 // NamespaceSummary describes a deployment namespace by its most recent measurement.
 type NamespaceSummary struct {
-	Namespace string  `json:"namespace"`
+	Namespace string `json:"namespace"`
+	// Cluster is the cluster of the cost backend the namespace was measured in; empty when the
+	// backend measures only its own, and for records stored before it was recorded.
+	Cluster   string  `json:"cluster,omitempty"`
 	TotalCost float64 `json:"totalCost"`
 	// IdleCost is the requested-but-unused CPU and memory cost from the same measurement. Nil when
 	// that measurement did not measure it.
@@ -196,6 +202,12 @@ type PodCost struct {
 	ControllerKind string  `json:"controllerKind"`
 	CPUCost        float64 `json:"cpuCost"`
 	RAMCost        float64 `json:"ramCost"`
+	// StorageCost, NetworkCost (load balancers included) and GPUCost are the rest of what the pod
+	// costs besides CPU and memory. They are omitted when zero, and records stored before they were
+	// kept have none.
+	StorageCost float64 `json:"storageCost,omitempty"`
+	NetworkCost float64 `json:"networkCost,omitempty"`
+	GPUCost     float64 `json:"gpuCost,omitempty"`
 	// SharedCost is the part of TotalCost that is shared cost spread over the pod (set only when
 	// shared costs are included), not the pod's own usage.
 	SharedCost float64 `json:"sharedCost,omitempty"`
