@@ -266,6 +266,15 @@ func (a *AllocationData) UnmarshalJSON(data []byte) error {
 	a.CPUCost += aux.CPUAdjustment
 	a.GPUCost += aux.GPUAdjustment
 	a.RAMCost += aux.RAMAdjustment
+	// The volumes of the allocation are listed with their own unadjusted costs; they shrink or grow with
+	// the adjustment too, so an application's share of the unmounted volumes is priced like the entry.
+	if raw := a.PVCost; raw > 0 && aux.PVAdjustment != 0 && len(a.PVs) > 0 {
+		scale := math.Max(0, raw+aux.PVAdjustment) / raw
+		for k, v := range a.PVs {
+			v.Cost *= scale
+			a.PVs[k] = v
+		}
+	}
 	a.PVCost += aux.PVAdjustment
 	// The network adjustment corrects the whole network cost, so its parts (cross-zone, cross-region,
 	// internet, NAT) shrink in the same proportion and still add up to it.

@@ -1347,3 +1347,21 @@ func TestAllocationData_ScalesNetworkPartsWithTheirAdjustment(t *testing.T) {
 	assert.InDelta(t, got.NetworkCost, got.NetworkCrossZoneCost+got.NetworkInternetCost, 1e-9)
 	assert.Less(t, got.NetworkCrossZoneCost, 0.001)
 }
+
+// The volumes an allocation lists carry their own costs, which the PV adjustment corrects with the
+// allocation's: otherwise an application's share of the unmounted volumes would be priced apart from
+// the entry that holds them.
+func TestAllocationData_ScalesVolumeCostsWithTheirAdjustment(t *testing.T) {
+	t.Parallel()
+
+	var got AllocationData
+	require.NoError(t, json.Unmarshal([]byte(`{
+		"pvCost": 10, "pvCostAdjustment": -2.5,
+		"pvs": {"cluster=c:name=pv-a": {"cost": 6}, "cluster=c:name=pv-b": {"cost": 4}}
+	}`), &got))
+
+	assert.InDelta(t, 7.5, got.PVCost, 1e-9)
+	assert.InDelta(t, 4.5, got.PVs["cluster=c:name=pv-a"].Cost, 1e-9)
+	assert.InDelta(t, 3.0, got.PVs["cluster=c:name=pv-b"].Cost, 1e-9)
+	assert.InDelta(t, got.PVCost, got.PVs["cluster=c:name=pv-a"].Cost+got.PVs["cluster=c:name=pv-b"].Cost, 1e-9)
+}
