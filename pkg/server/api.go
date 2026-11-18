@@ -723,7 +723,7 @@ func (s *CostAPIServer) handleGetOrphanedPods(w http.ResponseWriter, r *http.Req
 		render.JSON(w, r, map[string]string{"error": "invalid namespace: " + ns})
 		return
 	}
-	s.writeOrphanedPods(w, r, ns, nil)
+	s.writeOrphanedPods(w, r, ns, nil, false)
 }
 
 // GET /api/cost-analysis/{appName}/rightsizing
@@ -774,12 +774,28 @@ func (s *CostAPIServer) handleGetAppOrphanedPods(w http.ResponseWriter, r *http.
 	if !ok {
 		return
 	}
-	s.writeOrphanedPods(w, r, ns, resources)
+	s.writeOrphanedPods(w, r, ns, resources, s.soleApplication(r.Context(), app, ns))
 }
 
-// writeOrphanedPods writes a namespace's orphaned pods, only those the resources own unless they are
-// nil.
-func (s *CostAPIServer) writeOrphanedPods(w http.ResponseWriter, r *http.Request, ns string, resources models.ManagedResources) {
+// soleApplication reports whether app is the only Application deploying to namespace on this cluster,
+// and so owns the pods no application's controllers claim. An Application list that can't be read, or
+// none configured, is no.
+func (s *CostAPIServer) soleApplication(ctx context.Context, app models.AppRef, namespace string) bool {
+	if s.applications == nil {
+		return false
+	}
+	apps, err := s.applications.List(ctx)
+	if err != nil {
+		s.logger.Printf("Warning: listing Applications for %s: %v\n", namespace, err)
+		return false
+	}
+	sole, ok := exporter.SoleApplication(apps, namespace)
+	return ok && sole == app
+}
+
+// writeOrphanedPods writes a namespace's orphaned pods, only those the resources own (by controller or
+// owner label, and with sole the unowned pods too) unless they are nil.
+func (s *CostAPIServer) writeOrphanedPods(w http.ResponseWriter, r *http.Request, ns string, resources models.ManagedResources, sole bool) {
 	all, err := s.opencostCli.GetOrphanedPods(r.Context(), ns)
 	if err != nil {
 		s.logger.Printf("Error retrieving orphaned pods for namespace %s: %v\n", ns, err)
@@ -791,7 +807,8 @@ func (s *CostAPIServer) writeOrphanedPods(w http.ResponseWriter, r *http.Request
 	if resources != nil {
 		pods = []models.OrphanedPod{}
 		for _, p := range all {
-			if resources.OwnsPod(p.Namespace, p.ControllerKind, p.Controller, p.Name) {
+			if resources.OwnsPodLabeled(p.Namespace, p.ControllerKind, p.Controller, p.Name, p.Labels) ||
+				sole && resources.OwnsUnownedPod(p.Namespace, p.ControllerKind, p.Controller, p.Labels) {
 				pods = append(pods, p)
 			}
 		}

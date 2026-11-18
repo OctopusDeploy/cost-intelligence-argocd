@@ -19,9 +19,10 @@ import (
 )
 
 type Client struct {
-	baseURL string
-	client  *http.Client
-	logger  *log.Logger
+	baseURL     string
+	client      *http.Client
+	logger      *log.Logger
+	groupLabels []string
 }
 
 // ClientOption configures a Client.
@@ -30,6 +31,30 @@ type ClientOption func(*Client)
 // WithTransport sends the client's requests through transport, for example to instrument them.
 func WithTransport(transport http.RoundTripper) ClientOption {
 	return func(c *Client) { c.client.Transport = transport }
+}
+
+// WithPodGroupLabels names the pod labels (as Kubernetes spells them, for example
+// project.runner.gitlab.com/name) whose values form PodCost.Group: the values present, joined by " / ".
+// A pod with none has no group.
+func WithPodGroupLabels(labels []string) ClientOption {
+	return func(c *Client) {
+		for _, label := range labels {
+			if label = strings.TrimSpace(label); label != "" {
+				c.groupLabels = append(c.groupLabels, sanitizeLabelKey(label))
+			}
+		}
+	}
+}
+
+// sanitizeLabelKey spells a label key as OpenCost reports it: every character that is not a letter,
+// a digit or an underscore becomes an underscore.
+func sanitizeLabelKey(key string) string {
+	return strings.Map(func(r rune) rune {
+		if r == '_' || r >= '0' && r <= '9' || r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' {
+			return r
+		}
+		return '_'
+	}, key)
 }
 
 func NewClient(baseURL string, timeout time.Duration, logger *log.Logger, opts ...ClientOption) *Client {
@@ -316,9 +341,17 @@ func (c *Client) GetNamespaceSummary(ctx context.Context, namespace string) (*mo
 // PodAllocations is a namespace's pod-level allocation over the last 24 hours, from which both the
 // namespace's pods and one application's share of them are measured.
 type PodAllocations struct {
-	resp       AllocationResponse
-	start, end time.Time
+	resp        AllocationResponse
+	start, end  time.Time
+	groupLabels []string
+	// soleApplication says the application measured is the only one deploying to the namespace, so it
+	// also owns the pods no application's controllers claim (see models.ConfigureUnownedPodLabels).
+	soleApplication bool
 }
+
+// SoleApplication says whether the application measured next is the only one deploying to the
+// namespace. It is meant to be set once, before the pods are read.
+func (p *PodAllocations) SoleApplication(sole bool) { p.soleApplication = sole }
 
 func (c *Client) GetPodAllocations(ctx context.Context, namespace string) (*PodAllocations, error) {
 	startTime, endTime := last24h()
@@ -366,7 +399,7 @@ func (c *Client) podAllocations(ctx context.Context, namespace string, startTime
 		return nil, fmt.Errorf("failed to decode opencost response: %w", err)
 	}
 
-	return &PodAllocations{resp: result, start: startTime, end: endTime}, nil
+	return &PodAllocations{resp: result, start: startTime, end: endTime, groupLabels: c.groupLabels}, nil
 }
 
 // GetContainerAllocations returns every container of every pod in a namespace over the last 24
@@ -442,9 +475,48 @@ func parseContainerAllocations(resp AllocationResponse) []models.ContainerAlloca
 	return containers
 }
 
-// Pods returns every pod in the namespace with its monthly cost.
+// Pods returns every pod in the namespace with its monthly cost, and its group when grouping labels
+// are configured.
 func (p *PodAllocations) Pods() []models.PodCost {
-	return parsePodBreakdown(p.resp)
+	return p.grouped(parsePodBreakdown(p.resp), p.resp)
+}
+
+// grouped sets the group (team, project) of the pods that carry the grouping labels.
+func (p *PodAllocations) grouped(pods []models.PodCost, resp AllocationResponse) []models.PodCost {
+	if len(p.groupLabels) == 0 {
+		return pods
+	}
+	groups := podGroups(resp, p.groupLabels)
+	for i := range pods {
+		pods[i].Group = groups[pods[i].Name]
+	}
+	return pods
+}
+
+// podGroups maps each pod to the values of labels it carries, joined by " / ". A pod with none is absent.
+func podGroups(resp AllocationResponse, labels []string) map[string]string {
+	groups := make(map[string]string)
+	for _, allocations := range resp.Data {
+		for key, alloc := range allocations {
+			name := key
+			if alloc.Properties.Pod != "" {
+				name = alloc.Properties.Pod
+			}
+			if groups[name] != "" {
+				continue
+			}
+			var values []string
+			for _, label := range labels {
+				if value := alloc.Properties.Labels[label]; value != "" {
+					values = append(values, value)
+				}
+			}
+			if len(values) > 0 {
+				groups[name] = strings.Join(values, " / ")
+			}
+		}
+	}
+	return groups
 }
 
 // Efficiency measures every pod in the namespace as podEfficiency measures an application's: its
@@ -475,7 +547,7 @@ func (p *PodAllocations) Namespace() *models.OpenCostMetrics {
 // pods ran rather than the namespace's, so a new application in an older namespace is not
 // under-reported.
 func (p *PodAllocations) ForApplication(resources models.ManagedResources) *models.AppMeasurement {
-	owned := ownedAllocations(p.resp, resources)
+	owned := ownedAllocations(p.resp, resources, p.soleApplication)
 	metrics := parseOpenCostResponse(owned, p.start, p.end)
 	// The raw allocations are already stored once, with the namespace's measurement.
 	metrics.ResourceDetails = nil
@@ -485,7 +557,7 @@ func (p *PodAllocations) ForApplication(resources models.ManagedResources) *mode
 		TotalMonthlyCost: metrics.AllocationTotals.TotalCost,
 		OpenCostOutput:   *metrics,
 		Efficiency:       podEfficiency(owned),
-		Pods:             parsePodBreakdown(owned),
+		Pods:             p.grouped(parsePodBreakdown(owned), owned),
 	}
 }
 
@@ -509,7 +581,7 @@ func (p *PodAllocations) HourlyCostOf(resources models.ManagedResources) HourlyC
 	if hours <= 0 {
 		return cost
 	}
-	for _, allocations := range ownedAllocations(p.resp, resources).Data {
+	for _, allocations := range ownedAllocations(p.resp, resources, p.soleApplication).Data {
 		for _, a := range allocations {
 			cost.CPU += a.CPUCost
 			cost.Memory += a.RAMCost
@@ -527,8 +599,10 @@ func (p *PodAllocations) HourlyCostOf(resources models.ManagedResources) HourlyC
 	return cost
 }
 
-// ownedAllocations keeps the pod allocations the resources own, dropping OpenCost's virtual entries.
-func ownedAllocations(resp AllocationResponse, resources models.ManagedResources) AllocationResponse {
+// ownedAllocations keeps the pod allocations the resources own, by their controllers and by the
+// owner labels of their pods, dropping OpenCost's virtual entries. With sole, it keeps the pods no
+// application's controllers claim too (models.ManagedResources.OwnsUnownedPod).
+func ownedAllocations(resp AllocationResponse, resources models.ManagedResources, sole bool) AllocationResponse {
 	owned := AllocationResponse{Code: resp.Code, Data: make([]map[string]AllocationData, 0, len(resp.Data))}
 	for _, allocations := range resp.Data {
 		kept := make(map[string]AllocationData)
@@ -540,7 +614,9 @@ func ownedAllocations(resp AllocationResponse, resources models.ManagedResources
 			if pod == "" {
 				pod = key
 			}
-			if resources.OwnsPod(alloc.Properties.Namespace, alloc.Properties.ControllerKind, alloc.Properties.Controller, pod) {
+			props := alloc.Properties
+			if resources.OwnsPodLabeled(props.Namespace, props.ControllerKind, props.Controller, pod, props.Labels) ||
+				sole && resources.OwnsUnownedPod(props.Namespace, props.ControllerKind, props.Controller, props.Labels) {
 				kept[key] = alloc
 			}
 		}
@@ -966,6 +1042,7 @@ func parseOrphanedPods(resp AllocationResponse) []models.OrphanedPod {
 				Namespace:      alloc.Properties.Namespace,
 				Controller:     alloc.Properties.Controller,
 				ControllerKind: alloc.Properties.ControllerKind,
+				Labels:         alloc.Properties.Labels,
 				CPUCost:        alloc.CPUCost * monthlyMultiplier,
 				RAMCost:        alloc.RAMCost * monthlyMultiplier,
 				StorageCost:    alloc.PVCost * monthlyMultiplier,
