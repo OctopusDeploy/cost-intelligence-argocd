@@ -726,8 +726,8 @@ func unmountedVolumeCosts(resp AllocationResponse, namespace string) map[string]
 
 // pvName is the PV name in a volume key, which Kubecost and OpenCost spell cluster=<c>:name=<pv>.
 func pvName(key string) string {
-	if i := strings.LastIndex(key, "name="); i >= 0 {
-		return key[i+len("name="):]
+	if _, after, ok := strings.CutLast(key, "name="); ok {
+		return after
 	}
 	return key
 }

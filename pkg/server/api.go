@@ -10,6 +10,7 @@ import (
 	"math"
 	"net/http"
 	"net/url"
+	"slices"
 	"sort"
 	"strconv"
 	"time"
@@ -1096,7 +1097,7 @@ func (s *CostAPIServer) handleGetConfig(w http.ResponseWriter, r *http.Request) 
 	if s.discovered != nil {
 		known = s.discovered()
 		for _, id := range known {
-			measured = append(measured[:len(measured):len(measured)], MeasuredCluster{Name: id})
+			measured = append(slices.Clip(measured), MeasuredCluster{Name: id})
 		}
 	}
 	render.JSON(w, r, map[string]any{

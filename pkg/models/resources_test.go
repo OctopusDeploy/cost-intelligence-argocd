@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestManagedResources_OwnsPod(t *testing.T) {
@@ -108,8 +109,8 @@ func TestManagedResources_OpenTelemetryOperator(t *testing.T) {
 }
 
 func TestUnownedPodLabels(t *testing.T) {
-	assert.Error(t, ConfigureUnownedPodLabels("=Airflow"))
-	assert.NoError(t, ConfigureUnownedPodLabels("managedby=Airflow"))
+	require.Error(t, ConfigureUnownedPodLabels("=Airflow"))
+	require.NoError(t, ConfigureUnownedPodLabels("managedby=Airflow"))
 	t.Cleanup(func() { unownedPodLabels = nil })
 
 	resources := ManagedResources{{Kind: "Deployment", Name: "airflow-scheduler", Namespace: "airflow"}}
@@ -126,9 +127,9 @@ func TestUnownedPodLabels(t *testing.T) {
 
 func TestConfigureOwnership(t *testing.T) {
 	// Not parallel: it extends package-level lists.
-	assert.Error(t, ConfigureOwnership("=Foo", ""))
-	assert.Error(t, ConfigureOwnership("foo.io/cluster=", ""))
-	assert.NoError(t, ConfigureOwnership("foo.io/cluster=Foo|FooShard, example.com/owner", "Widget"))
+	require.Error(t, ConfigureOwnership("=Foo", ""))
+	require.Error(t, ConfigureOwnership("foo.io/cluster=", ""))
+	require.NoError(t, ConfigureOwnership("foo.io/cluster=Foo|FooShard, example.com/owner", "Widget"))
 
 	resources := ManagedResources{{Kind: "Foo", Name: "f1", Namespace: "ns"}, {Kind: "Bar", Name: "b1", Namespace: "ns"}}
 	assert.True(t, resources.OwnsPodLabeled("ns", "statefulset", "gen", "gen-0", map[string]string{"foo.io/cluster": "f1"}))

@@ -316,7 +316,7 @@ func validateOpenCostURL(rawURL string) error {
 // validHeaderName reports whether name can be an HTTP header field name; empty means Authorization.
 func validHeaderName(name string) bool {
 	for _, r := range name {
-		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-' || r == '_') {
+		if (r < 'a' || r > 'z') && (r < 'A' || r > 'Z') && (r < '0' || r > '9') && r != '-' && r != '_' {
 			return false
 		}
 	}

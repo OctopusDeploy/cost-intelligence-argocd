@@ -21,11 +21,15 @@ func runnersWithVolumes() *PodAllocations {
 	pods := &PodAllocations{
 		namespace: runnersNamespace,
 		resp: AllocationResponse{Data: []map[string]AllocationData{{
-			"runner-1": {Start: day, End: day.Add(24 * 60 * 60e9), Minutes: 24 * 60, CPUCost: 1, TotalCost: 1,
-				Properties: AllocationProperties{Namespace: runnersNamespace, Pod: "runner-1", ControllerKind: "deployment", Controller: "runner"}},
+			"runner-1": {
+				Start: day, End: day.Add(24 * 60 * 60e9), Minutes: 24 * 60, CPUCost: 1, TotalCost: 1,
+				Properties: AllocationProperties{Namespace: runnersNamespace, Pod: "runner-1", ControllerKind: "deployment", Controller: "runner"},
+			},
 			// Kubecost keeps no namespace on this entry.
-			"ci-unmounted-pvcs": {Start: day, End: day.Add(24 * 60 * 60e9), Minutes: 24 * 60, PVCost: 6, TotalCost: 6,
-				Properties: AllocationProperties{Pod: "ci-unmounted-pvcs"}},
+			"ci-unmounted-pvcs": {
+				Start: day, End: day.Add(24 * 60 * 60e9), Minutes: 24 * 60, PVCost: 6, TotalCost: 6,
+				Properties: AllocationProperties{Pod: "ci-unmounted-pvcs"},
+			},
 		}}},
 		volumeCosts: map[string]float64{"pv-a": 2, "pv-b": 3, "pv-c": 1},
 		claimOf: map[string]claimRef{

@@ -82,7 +82,7 @@ func runAPI(cfg *config.Config, logger *log.Logger) {
 	measured := costScope(cfg, opencostClient, logger)
 	serverOpts = append(serverOpts, server.WithScope(measured))
 	if clusters, ok := measured.(*clustermap.Map); ok {
-		var others []server.MeasuredCluster
+		others := make([]server.MeasuredCluster, 0, len(clusters.Clusters()))
 		for _, c := range clusters.Clusters() {
 			others = append(others, server.MeasuredCluster{Server: c.Server, Name: c.Name})
 		}

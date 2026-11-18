@@ -3,6 +3,7 @@ package models
 import (
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 )
 
@@ -219,7 +220,7 @@ func labelKey(k string) string {
 // names any custom resource, for example "foo.io/cluster=Foo|FooShard,example.com/owner". nonOwnerKinds
 // is a comma-separated list of kinds Argo CD lists that never own pods, dropped from the notification.
 func ConfigureOwnership(ownerLabels, nonOwnerKinds string) error {
-	for _, entry := range strings.Split(ownerLabels, ",") {
+	for entry := range strings.SplitSeq(ownerLabels, ",") {
 		entry = strings.TrimSpace(entry)
 		if entry == "" {
 			continue
@@ -234,7 +235,7 @@ func ConfigureOwnership(ownerLabels, nonOwnerKinds string) error {
 			continue
 		}
 		var list []string
-		for _, k := range strings.Split(kinds, "|") {
+		for k := range strings.SplitSeq(kinds, "|") {
 			if k = strings.ToLower(strings.TrimSpace(k)); k != "" {
 				list = append(list, k)
 			}
@@ -245,7 +246,7 @@ func ConfigureOwnership(ownerLabels, nonOwnerKinds string) error {
 		key := labelKey(label)
 		kindOwnerLabels[key] = append(kindOwnerLabels[key], list...)
 	}
-	for _, k := range strings.Split(nonOwnerKinds, ",") {
+	for k := range strings.SplitSeq(nonOwnerKinds, ",") {
 		if k = strings.ToLower(strings.TrimSpace(k)); k != "" {
 			nonPodOwnerKinds[k] = true
 		}
@@ -264,7 +265,7 @@ var unownedPodLabels []unownedPodLabel
 // deployed in their namespace: a comma-separated list of "<label>=<value>" or "<label>" (any value),
 // for example "managedby=Airflow". It must be called once at startup.
 func ConfigureUnownedPodLabels(spec string) error {
-	for _, entry := range strings.Split(spec, ",") {
+	for entry := range strings.SplitSeq(spec, ",") {
 		entry = strings.TrimSpace(entry)
 		if entry == "" {
 			continue
@@ -310,10 +311,8 @@ func (rs ManagedResources) OwnerOfLabeled(namespace, controllerKind, controller,
 			if normalised[key] != r.Name {
 				continue
 			}
-			for _, k := range kinds {
-				if k == rk {
-					return r, true
-				}
+			if slices.Contains(kinds, rk) {
+				return r, true
 			}
 		}
 		if workloadKinds[rk] {
