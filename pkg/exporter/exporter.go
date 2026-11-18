@@ -378,12 +378,3 @@ func add(a, b opencost.HourlyCost) opencost.HourlyCost {
 		CPUIdle: a.CPUIdle + b.CPUIdle, MemoryIdle: a.MemoryIdle + b.MemoryIdle,
 	}
 }
-
-func sortedKeys(m map[string]bool) []string {
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	return keys
-}
