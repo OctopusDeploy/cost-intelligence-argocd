@@ -234,6 +234,10 @@ func (e *Exporter) costSamples(ctx context.Context, apps []Application) []sample
 			e.fail(StageOpenCost, err)
 			continue
 		}
+		if s, ok := costs.(interface{ SoleApplication(bool) }); ok {
+			_, sole := SoleApplication(apps, ns)
+			s.SoleApplication(sole)
+		}
 		measured[ns] = costs
 	}
 
@@ -335,4 +339,26 @@ func sortedKeys(m map[string]bool) []string {
 	}
 	sort.Strings(keys)
 	return keys
+}
+
+// SoleApplication returns the Application that is the only one deploying to namespace on this
+// cluster, an Application being there when it deploys to it by default or has a workload in it.
+// Applications deploying to another cluster are not there, and the access Application is not listed.
+// False when no Application, or several, deploy there.
+func SoleApplication(apps []Application, namespace string) (models.AppRef, bool) {
+	var sole models.AppRef
+	found := false
+	for _, app := range apps {
+		if !app.Destination.Local() {
+			continue
+		}
+		if app.Destination.Namespace != namespace && !appNamespaces(app)[namespace] {
+			continue
+		}
+		if found {
+			return models.AppRef{}, false
+		}
+		sole, found = app.Ref, true
+	}
+	return sole, found
 }

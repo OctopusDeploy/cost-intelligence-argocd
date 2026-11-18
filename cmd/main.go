@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -41,6 +42,12 @@ func main() {
 
 	if err := cfg.Validate(); err != nil {
 		logger.Fatalf("Invalid configuration: %v", err)
+	}
+	if err := models.ConfigureOwnership(cfg.OwnerLabels, cfg.NonOwnerKinds); err != nil {
+		logger.Fatalf("Invalid OWNER_LABELS: %v", err)
+	}
+	if err := models.ConfigureUnownedPodLabels(cfg.UnownedPodLabels); err != nil {
+		logger.Fatalf("Invalid UNOWNED_POD_LABELS: %v", err)
 	}
 
 	if cfg.Mode == config.ModeExporter {
@@ -126,7 +133,9 @@ func runAPI(cfg *config.Config, logger *log.Logger) {
 	if kubeClient != nil {
 		applications = exporter.NewKubeApplicationLister(kubeClient)
 		// The waste ranking is read by every viewer of the Idle spend tab, which refreshes it often.
-		serverOpts = append(serverOpts, server.WithApplications(exporter.NewCachedApplicationLister(applications, time.Minute)))
+		cached := exporter.NewCachedApplicationLister(applications, time.Minute)
+		serverOpts = append(serverOpts, server.WithApplications(cached))
+		syncHook.WithApplications(cached)
 	}
 
 	// Initialize API server
@@ -333,6 +342,9 @@ func logVPAAvailability(ctx context.Context, vpa vpaChecker, logger *log.Logger)
 // newOpenCostClient creates the OpenCost client, timing its requests when metrics are on.
 func newOpenCostClient(cfg *config.Config, metrics *telemetry.Metrics, logger *log.Logger) *opencost.Client {
 	var opts []opencost.ClientOption
+	if cfg.UnmanagedGroupLabels != "" {
+		opts = append(opts, opencost.WithPodGroupLabels(strings.Split(cfg.UnmanagedGroupLabels, ",")))
+	}
 	if metrics != nil {
 		// Validate has checked the URL.
 		base, _ := url.Parse(cfg.OpenCost.BaseURL)
