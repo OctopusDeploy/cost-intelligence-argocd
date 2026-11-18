@@ -111,6 +111,20 @@ spec:
           value: {{ .Values.costIntelligence.pruneRemoteCost | quote }}
         - name: VPA_ENABLED
           value: {{ .Values.costIntelligence.vpa.enabled | quote }}
+        - name: UNMANAGED_GROUP_LABELS
+          value: {{ join "," (.Values.costIntelligence.unmanagedGroupLabels | default list) | quote }}
+        {{- with .Values.costIntelligence.ownerLabels }}
+        - name: OWNER_LABELS
+          value: {{ join "," . | quote }}
+        {{- end }}
+        {{- with .Values.costIntelligence.nonOwnerKinds }}
+        - name: NON_OWNER_KINDS
+          value: {{ join "," . | quote }}
+        {{- end }}
+        {{- with .Values.costIntelligence.unownedPodLabels }}
+        - name: UNOWNED_POD_LABELS
+          value: {{ join "," . | quote }}
+        {{- end }}
         - name: LOG_LEVEL
           value: {{ .Values.costIntelligence.logLevel | quote }}
         {{- with include "cost-intelligence-argocd.clusterScopeApp" . }}

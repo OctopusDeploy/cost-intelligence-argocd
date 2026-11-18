@@ -169,6 +169,10 @@ type PodCost struct {
 	CPUCost        float64 `json:"cpuCost"`
 	RAMCost        float64 `json:"ramCost"`
 	TotalCost      float64 `json:"totalCost"`
+	// Group is the value of the configured grouping labels (UNMANAGED_GROUP_LABELS), for listing the
+	// pods no Argo CD application manages by team or project. Presentation only: it never decides
+	// which application owns a pod.
+	Group string `json:"group,omitempty"`
 }
 
 type OrphanedPod struct {
@@ -180,6 +184,8 @@ type OrphanedPod struct {
 	RAMCost        float64 `json:"ramCost"`
 	StorageCost    float64 `json:"storageCost"`
 	TotalCost      float64 `json:"totalCost"`
+	// Labels are the pod's, for the ownership rules that read them. Never sent.
+	Labels map[string]string `json:"-"`
 }
 
 type EfficiencyMetrics struct {

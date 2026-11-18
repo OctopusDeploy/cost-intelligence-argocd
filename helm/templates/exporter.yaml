@@ -54,6 +54,18 @@ spec:
           value: {{ .Values.metrics.exporter.interval | quote }}
         - name: LOG_LEVEL
           value: {{ .Values.costIntelligence.logLevel | quote }}
+        {{- with .Values.costIntelligence.ownerLabels }}
+        - name: OWNER_LABELS
+          value: {{ join "," . | quote }}
+        {{- end }}
+        {{- with .Values.costIntelligence.nonOwnerKinds }}
+        - name: NON_OWNER_KINDS
+          value: {{ join "," . | quote }}
+        {{- end }}
+        {{- with .Values.costIntelligence.unownedPodLabels }}
+        - name: UNOWNED_POD_LABELS
+          value: {{ join "," . | quote }}
+        {{- end }}
         # PostgreSQL, for the cloud estimates CI pushes.
         - name: DB_HOST
           value: {{ include "cost-intelligence-argocd.postgres.host" . | quote }}
