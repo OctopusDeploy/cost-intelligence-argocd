@@ -37,7 +37,13 @@ func TestManagedResources_OwnsPod(t *testing.T) {
 		{"rollout reported as itself", "shop", "rollout", "api", "api-6f7c9-x", true},
 		{"replicaset of the rollout", "shop", "replicaset", "api-6f7c9b8d5", "api-6f7c9b8d5-x", true},
 		{"replicaset named like the rollout", "shop", "replicaset", "api-gateway", "api-gateway-x", false},
+		{"replicaset of the deployment", "shop", "replicaset", "web-7d4b8c9f5", "web-7d4b8c9f5-xk", true},
+		{"replicaset named like the deployment", "shop", "replicaset", "web-api", "web-api-xk", false},
+		{"deployment pod reported without controller", "shop", "", "", "web-7d4b8c9f5-xk2lm", true},
+		{"statefulset pod reported without controller", "shop", "", "", "db-0", true},
+		{"pod named like the deployment but not its", "shop", "", "", "web-api-xk2lm", false},
 		{"cloudnativepg cluster pod", "shop", "cluster", "pg", "pg-1", true},
+		{"cloudnativepg cluster pod reported without controller", "shop", "", "", "pg-2", true},
 		{"cloudnativepg cluster of another kind", "shop", "statefulset", "pg", "pg-1", false},
 		{"custom resource owning pods directly", "shop", "workflow", "etl", "etl-step-1", true},
 		{"bare pod", "shop", "", "", "debug", true},
@@ -94,6 +100,8 @@ func TestManagedResources_OpenTelemetryOperator(t *testing.T) {
 	assert.True(t, resources.OwnsPod("obs", "replicaset", "otel-collector-7d4b8c9f5", "otel-collector-7d4b8c9f5-xk2lm"))
 	assert.True(t, resources.OwnsPod("obs", "daemonset", "otel-collector", "otel-collector-abcde"))
 	assert.True(t, resources.OwnsPod("obs", "deployment", "otel-targetallocator", "otel-targetallocator-7d4b8c9f5-xk2lm"))
+	assert.True(t, resources.OwnsPod("obs", "", "", "otel-targetallocator-7d4b8c9f5-xk2lm"), "no controller reported")
+	assert.True(t, resources.OwnsPod("obs", "", "", "otel-collector-0"), "statefulset pod, no controller reported")
 	assert.False(t, resources.OwnsPod("obs", "deployment", "otel-collector-gateway", "otel-collector-gateway-7d4b8c9f5-xk2lm"))
 	assert.False(t, resources.OwnsPod("other", "deployment", "otel-collector", "otel-collector-7d4b8c9f5-xk2lm"))
 
@@ -168,6 +176,21 @@ func TestManagedResources_PodOwners(t *testing.T) {
 	odd := ManagedResources{{Kind: "Widget", Name: "Not A Name"}, {Kind: "Deployment", Name: "Bad Name"}}
 	assert.Equal(t, ManagedResources{{Kind: "Deployment", Name: "Bad Name"}}, odd.PodOwners(), "a custom resource with a free-form name is skipped, a workload's is kept to fail Valid")
 	assert.False(t, odd.PodOwners().Valid())
+}
+
+func TestManagedResources_MeasuredAddsClaimsButNeverAsPodOwners(t *testing.T) {
+	t.Parallel()
+
+	resources := ManagedResources{
+		{Kind: "Service", Name: "web"},
+		{Kind: "Deployment", Name: "web"},
+		{Kind: "PersistentVolumeClaim", Name: "builds-1", Namespace: "ci"},
+		{Kind: "PersistentVolumeClaim", Name: "elsewhere", Namespace: "other"},
+	}
+
+	assert.Equal(t, ManagedResources{resources[1], resources[2], resources[3]}, resources.Measured())
+	assert.Equal(t, ManagedResources{resources[1]}, resources.Measured().PodOwners())
+	assert.Equal(t, map[string]bool{"builds-1": true}, resources.Claims("ci"))
 }
 
 func TestManagedResources_Valid(t *testing.T) {

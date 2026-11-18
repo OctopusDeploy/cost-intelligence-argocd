@@ -80,6 +80,31 @@ func (rs ManagedResources) PodOwners() ManagedResources {
 	return owners
 }
 
+// Measured keeps the resources an application's cost is measured from: the ones that may own pods and
+// its PersistentVolumeClaims, whose volumes cost money whether or not a pod mounts them. Claims never
+// own pods: PodOwners drops them.
+func (rs ManagedResources) Measured() ManagedResources {
+	measured := rs.PodOwners()
+	for _, r := range rs {
+		if strings.EqualFold(r.Kind, "PersistentVolumeClaim") {
+			measured = append(measured, r)
+		}
+	}
+	return measured
+}
+
+// Claims returns the names of the PersistentVolumeClaims of the namespace the resources list. A claim
+// with no namespace is the namespace's.
+func (rs ManagedResources) Claims(namespace string) map[string]bool {
+	claims := map[string]bool{}
+	for _, r := range rs {
+		if strings.EqualFold(r.Kind, "PersistentVolumeClaim") && (r.Namespace == "" || r.Namespace == namespace) {
+			claims[r.Name] = true
+		}
+	}
+	return claims
+}
+
 // Valid reports whether every resource has a valid Kubernetes object name, so names taken from a
 // notification can safely be stored and matched.
 func (rs ManagedResources) Valid() bool {
@@ -99,6 +124,16 @@ func (rs ManagedResources) Valid() bool {
 var (
 	cronJobRun        = regexp.MustCompile(`^-\d+$`)
 	rolloutReplicaSet = regexp.MustCompile(`^-[bcdfghjklmnpqrstvwxz2456789]{5,10}$`)
+)
+
+// podSuffix matches the rest of a pod's name after its owner's name, for a pod whose controller the
+// provider does not report (Kubecost's pod allocations carry none): a Deployment or Rollout pod is
+// <name>-<pod template hash>-<5 characters>, a StatefulSet pod <name>-<ordinal>, a DaemonSet or Job pod
+// <name>-<5 characters>.
+var (
+	replicaPodSuffix = regexp.MustCompile(`^-[bcdfghjklmnpqrstvwxz2456789]{5,10}-[a-z0-9]{5}$`)
+	ordinalPodSuffix = regexp.MustCompile(`^-\d+$`)
+	randomPodSuffix  = regexp.MustCompile(`^-[a-z0-9]{5}$`)
 )
 
 // OwnsPod reports whether one of the resources owns a pod. See OwnerOf.
@@ -141,7 +176,7 @@ var generatedWorkloadSuffixes = map[string][]string{
 }
 
 // ownsGenerated reports whether a pod belongs to the workload an operator generated for the resource.
-func ownsGenerated(r ManagedResource, kind, controller string) bool {
+func ownsGenerated(r ManagedResource, kind, controller, pod string) bool {
 	for _, suffix := range generatedWorkloadSuffixes[strings.ToLower(r.Kind)] {
 		base := r.Name + suffix
 		if controller != "" {
@@ -154,6 +189,13 @@ func ownsGenerated(r ManagedResource, kind, controller string) bool {
 				if strings.HasPrefix(controller, base) && rolloutReplicaSet.MatchString(controller[len(base):]) {
 					return true
 				}
+			}
+			continue
+		}
+		if strings.HasPrefix(pod, base) {
+			rest := pod[len(base):]
+			if replicaPodSuffix.MatchString(rest) || ordinalPodSuffix.MatchString(rest) || randomPodSuffix.MatchString(rest) {
+				return true
 			}
 		}
 	}
@@ -402,35 +444,60 @@ func (rs ManagedResources) OwnsUnownedPod(namespace, controllerKind, controller 
 }
 
 // OwnerOf returns the resource that owns a pod, given the namespace, controller kind and controller
-// name OpenCost reports for it, and the pod's name. OpenCost reports a Deployment's pods under the
-// Deployment, and a pod without a controller under no controller at all. A resource with no namespace
-// (one Argo CD lists without it) matches in any namespace.
+// name the cost backend reports for it, and the pod's name. OpenCost reports a Deployment's pods under
+// the Deployment, and a pod without a controller under no controller at all. A resource with no
+// namespace (one Argo CD lists without it) matches in any namespace. A pod reported with no controller
+// is matched by the shape of its name, as a pod without owner references is rare and one named like
+// <resource>-<hash>-<suffix> is almost always the resource's.
 func (rs ManagedResources) OwnerOf(namespace, controllerKind, controller, pod string) (ManagedResource, bool) {
 	kind := strings.ToLower(controllerKind)
 	for _, r := range rs {
 		if r.Namespace != "" && r.Namespace != namespace {
 			continue
 		}
-		if ownsGenerated(r, kind, controller) {
+		rk := strings.ToLower(r.Kind)
+		if ownsGenerated(r, kind, controller, pod) {
 			return r, true
 		}
-		switch strings.ToLower(r.Kind) {
-		case "pod":
-			if controller == "" && pod == r.Name {
+		if controller == "" {
+			if rk == "pod" && pod == r.Name {
 				return r, true
 			}
+			if strings.HasPrefix(pod, r.Name) {
+				rest := pod[len(r.Name):]
+				switch rk {
+				case "deployment", "rollout":
+					if replicaPodSuffix.MatchString(rest) {
+						return r, true
+					}
+				case "statefulset", "cluster":
+					if ordinalPodSuffix.MatchString(rest) {
+						return r, true
+					}
+				case "daemonset", "job":
+					if randomPodSuffix.MatchString(rest) {
+						return r, true
+					}
+				}
+			}
+			continue
+		}
+		switch rk {
+		case "pod":
 		case "cronjob":
 			if (kind == "cronjob" && controller == r.Name) ||
 				(kind == "job" && strings.HasPrefix(controller, r.Name) && cronJobRun.MatchString(controller[len(r.Name):])) {
 				return r, true
 			}
-		case "rollout":
-			if (kind == "rollout" && controller == r.Name) ||
+		case "rollout", "deployment":
+			// A Deployment's pods are reported under the Deployment by OpenCost, but a provider that
+			// does not resolve the owner reports its ReplicaSet instead.
+			if (kind == rk && controller == r.Name) ||
 				(kind == "replicaset" && strings.HasPrefix(controller, r.Name) && rolloutReplicaSet.MatchString(controller[len(r.Name):])) {
 				return r, true
 			}
 		default:
-			if strings.EqualFold(kind, r.Kind) && controller == r.Name {
+			if kind == rk && controller == r.Name {
 				return r, true
 			}
 		}

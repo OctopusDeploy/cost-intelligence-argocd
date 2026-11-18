@@ -96,12 +96,12 @@ func TestRankWaste_LeavesOutApplicationsNotDeployingHere(t *testing.T) {
 
 	remoteNamespaceOnly := measuredApp("argocd", "remote-legacy", 0, 0)
 	remoteNamespaceOnly.App = nil
-	local := localApplications([]exporter.Application{
+	local := measuredApplications([]exporter.Application{
 		{Ref: models.AppRef{Namespace: "argocd", Name: "here"}},
 		{Ref: models.AppRef{Namespace: "argocd", Name: "named"}, Destination: exporter.Destination{Name: exporter.LocalName}},
 		{Ref: models.AppRef{Namespace: "argocd", Name: "remote"}, Destination: exporter.Destination{Server: "https://prod.example.com"}},
 		{Ref: models.AppRef{Namespace: "argocd", Name: "remote-legacy"}, Destination: exporter.Destination{Name: "prod"}},
-	})
+	}, exporter.LocalOnly{})
 
 	ranking := rankWaste([]models.CostActual{
 		measuredApp("argocd", "here", 10, 0),
@@ -156,6 +156,25 @@ func TestHandleGetWaste(t *testing.T) {
 		assert.InDelta(t, 40, got.IdleCost, 1e-9)
 	})
 
+	t.Run("a cluster picked leaves out the applications of the others", func(t *testing.T) {
+		t.Parallel()
+		srv := newTestAPIServer(t, store,
+			WithClusters([]ClusterChoice{{ID: "eks-hub", Local: true}, {ID: "eks-eu"}}),
+			WithScope(mappedScope{"prod": "eks-eu"}),
+			WithApplications(stubApplications{apps: []exporter.Application{
+				{Ref: models.AppRef{Namespace: "argocd", Name: "web"}},
+				{Ref: models.AppRef{Namespace: "argocd", Name: "remote"}, Destination: exporter.Destination{Name: "prod"}},
+			}}))
+		for cluster, want := range map[string]string{"eks-hub": "web", "eks-eu": "remote"} {
+			rr := doRequestWithHeaders(t, srv, http.MethodGet, "/api/cost-analysis/waste?cluster="+cluster, nil, gate)
+			require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+			var got models.WasteRanking
+			require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &got))
+			require.Len(t, got.Apps, 1, cluster)
+			assert.Equal(t, want, got.Apps[0].ApplicationName, cluster)
+		}
+	})
+
 	t.Run("ranks every stored application without a list", func(t *testing.T) {
 		t.Parallel()
 		srv := newTestAPIServer(t, store)
@@ -184,4 +203,59 @@ func TestHandleGetWaste(t *testing.T) {
 		assert.Equal(t, http.StatusInternalServerError, rr.Code)
 		assert.NotContains(t, rr.Body.String(), "connection refused")
 	})
+}
+
+type mappedScope map[string]string
+
+func TestHandleGetNamespaceApps_APickedClusterLeavesOutTheApplicationsOfTheOthers(t *testing.T) {
+	t.Parallel()
+
+	store := &mockStorage{getLatestActualsForNamespaceFn: func(context.Context, string) ([]models.CostActual, error) {
+		return []models.CostActual{
+			{ApplicationNamespace: "argocd", ApplicationName: "karpenter-va", DeploymentNamespace: "karpenter"},
+			{ApplicationNamespace: "argocd", ApplicationName: "karpenter-int", DeploymentNamespace: "karpenter"},
+		}, nil
+	}}
+	srv := newTestAPIServer(t, store,
+		WithClusters([]ClusterChoice{{ID: "eks-hub", Local: true}, {ID: "eks-eu"}}),
+		WithScope(mappedScope{"prod": "eks-eu"}),
+		WithApplications(stubApplications{apps: []exporter.Application{
+			{Ref: models.AppRef{Namespace: "argocd", Name: "karpenter-va"}},
+			{Ref: models.AppRef{Namespace: "argocd", Name: "karpenter-int"}, Destination: exporter.Destination{Name: "prod"}},
+		}}))
+	gate := asApp(testGateApp.String())
+
+	for cluster, want := range map[string]string{"eks-hub": "karpenter-va", "eks-eu": "karpenter-int"} {
+		rr := doRequestWithHeaders(t, srv, http.MethodGet, "/api/cost-analysis/namespace/karpenter/apps?cluster="+cluster, nil, gate)
+		require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+		var got struct {
+			Apps []models.CostActual `json:"apps"`
+		}
+		require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &got))
+		require.Len(t, got.Apps, 1, cluster)
+		assert.Equal(t, want, got.Apps[0].ApplicationName, cluster)
+	}
+}
+
+func (m mappedScope) ClusterFor(dest exporter.Destination) (string, bool) {
+	if dest.Local() {
+		return "", true
+	}
+	id, ok := m[dest.Name]
+	return id, ok
+}
+
+func TestMeasuredApplications_CountsTheClustersTheScopeMaps(t *testing.T) {
+	t.Parallel()
+
+	got := measuredApplications([]exporter.Application{
+		{Ref: models.AppRef{Namespace: "argocd", Name: "here"}},
+		{Ref: models.AppRef{Namespace: "argocd", Name: "mapped"}, Destination: exporter.Destination{Name: "CICD"}},
+		{Ref: models.AppRef{Namespace: "argocd", Name: "unmapped"}, Destination: exporter.Destination{Name: "prod"}},
+	}, mappedScope{"CICD": "eks-cicd"})
+
+	assert.Equal(t, map[models.AppRef]bool{
+		{Namespace: "argocd", Name: "here"}:   true,
+		{Namespace: "argocd", Name: "mapped"}: true,
+	}, got)
 }

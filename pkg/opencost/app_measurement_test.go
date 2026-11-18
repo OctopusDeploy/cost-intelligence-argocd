@@ -308,3 +308,42 @@ func TestGetDailyTimeSeries_ScopedToTheApplicationsControllers(t *testing.T) {
 	assert.InDelta(t, 1.27, whole[0].TotalCost, 1e-9)
 	assert.Equal(t, []string{"controller", "namespace"}, aggregates)
 }
+
+func TestPodAllocations_namespaceFallbackAndVirtualEntries(t *testing.T) {
+	t.Parallel()
+
+	// Kubecost keeps only the properties every entry shares, so a pod can come without a namespace;
+	// its idle and unmounted entries are not pods.
+	pods := &PodAllocations{namespace: "shop", resp: AllocationResponse{Data: []map[string]AllocationData{{
+		"web-1":         {CPUCost: 1, Properties: AllocationProperties{Pod: "web-1", Controller: "web", ControllerKind: "deployment"}},
+		"__idle__":      {CPUCost: 9},
+		"__unmounted__": {CPUCost: 5},
+	}}}}
+	resources := models.ManagedResources{{Kind: "Deployment", Name: "web", Namespace: "shop"}}
+
+	app := pods.ForApplication(resources)
+	require.Len(t, app.Pods, 1)
+	assert.Equal(t, "web-1", app.Pods[0].Name)
+	for _, p := range pods.Pods() {
+		assert.NotContains(t, p.Name, "__")
+	}
+}
+
+func TestForApplication_UnownedPodsGoToTheSoleApplicationOnly(t *testing.T) {
+	// Not parallel: the unowned pod labels are shared; the cleanup restores them.
+	t.Cleanup(models.ResetOwnership)
+	require.NoError(t, models.ConfigureUnownedPodLabels("runner.example.com/job"))
+
+	pods := &PodAllocations{namespace: "ci", resp: AllocationResponse{Data: []map[string]AllocationData{{
+		"web-1": {CPUCost: 1, Properties: AllocationProperties{Pod: "web-1", Controller: "web", ControllerKind: "deployment"}},
+		"job-1": {CPUCost: 4, Properties: AllocationProperties{Pod: "job-1", Labels: map[string]string{"runner_example_com_job": "x"}}},
+	}}}}
+	resources := models.ManagedResources{{Kind: "Deployment", Name: "web", Namespace: "ci"}}
+
+	shared := pods.ForApplication(resources)
+	require.Len(t, shared.Pods, 1, "with several applications in the namespace each would claim the job pod")
+
+	pods.SoleApplication(true)
+	alone := pods.ForApplication(resources)
+	assert.Len(t, alone.Pods, 2)
+}
