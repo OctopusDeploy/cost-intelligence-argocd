@@ -161,3 +161,22 @@ func TestKubeApplicationLister_ReportsAFailure(t *testing.T) {
 	require.Error(t, err)
 	assert.True(t, apierrors.IsForbidden(err))
 }
+
+func TestSoleApplication(t *testing.T) {
+	t.Parallel()
+
+	web := Application{Ref: models.AppRef{Namespace: "argocd", Name: "web"}, Destination: Destination{Server: LocalServer, Namespace: "web"}}
+	api := Application{Ref: models.AppRef{Namespace: "argocd", Name: "api"}, Destination: Destination{Server: LocalServer, Namespace: "api"},
+		Workloads: models.ManagedResources{{Kind: "Deployment", Name: "api", Namespace: "web"}}}
+	elsewhere := Application{Ref: models.AppRef{Namespace: "argocd", Name: "far"}, Destination: Destination{Server: "https://other", Namespace: "web"}}
+
+	got, ok := SoleApplication([]Application{web, elsewhere}, LocalOnly{}, "", "web")
+	assert.True(t, ok, "an application of another cluster does not share the namespace")
+	assert.Equal(t, web.Ref, got)
+
+	_, ok = SoleApplication([]Application{web, api}, LocalOnly{}, "", "web")
+	assert.False(t, ok, "an application with a workload there shares it")
+
+	_, ok = SoleApplication([]Application{web}, LocalOnly{}, "", "other")
+	assert.False(t, ok, "no application deploys there")
+}

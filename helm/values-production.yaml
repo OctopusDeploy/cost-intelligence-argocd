@@ -101,7 +101,7 @@ ingress:
         - cost-intel.prod.example.com
 
 nodeSelector:
-  workload: platform-services
+  karpenter.sh/nodepool: argocd
 
 affinity:
   podAntiAffinity:

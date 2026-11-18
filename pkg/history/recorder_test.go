@@ -393,3 +393,45 @@ func (o *signalSource) GetDailyTimeSeries(context.Context, string, time.Time, ti
 	}
 	return nil, nil
 }
+
+func TestRecordOnce_RetentionKeepsEveryQueryWithinWhatTheSourceHas(t *testing.T) {
+	t.Parallel()
+
+	store := newFakeStore(record(web, "shop", webDeploy))
+	source := &fakeOpenCost{costs: costsFrom("shop", "2026-06-01", "2026-10-03", 2)}
+	recorder := newTestRecorder(store, source, "2026-10-03T12:00:00Z").WithRetention(15)
+
+	require.NoError(t, recorder.RecordOnce(context.Background()))
+
+	assert.Equal(t, []call{{"shop", "2026-09-19", "2026-10-02", models.ScopeApplication}}, source.calls,
+		"one window of 15 days, not the 30 the source would refuse")
+	assert.Len(t, store.storedDates(web), 14)
+}
+
+func TestRecordOnce_RetentionCatchesUpInWindowsThatFit(t *testing.T) {
+	t.Parallel()
+
+	store := newFakeStore(record(web, "shop", webDeploy))
+	store.progress[web] = models.DailyProgress{Through: "2026-09-01", Scope: models.ScopeApplication}
+	source := &fakeOpenCost{costs: costsFrom("shop", "2026-06-01", "2026-10-03", 2)}
+	recorder := newTestRecorder(store, source, "2026-10-03T12:00:00Z").WithRetention(15)
+
+	require.NoError(t, recorder.RecordOnce(context.Background()))
+
+	assert.Equal(t, []call{{"shop", "2026-09-19", "2026-10-02", models.ScopeApplication}}, source.calls,
+		"a gap longer than the source keeps is skipped, not asked for")
+}
+
+func TestRecordOnce_RetentionDoesNotPruneWhatIsAlreadyStored(t *testing.T) {
+	t.Parallel()
+
+	store := newFakeStore(record(web, "shop", webDeploy))
+	require.NoError(t, store.SaveDailyCosts(context.Background(), web, "shop", models.ScopeApplication,
+		[]models.DailyCost{{Date: "2026-08-01", TotalCost: 5}}))
+	source := &fakeOpenCost{costs: costsFrom("shop", "2026-06-01", "2026-10-03", 2)}
+	recorder := newTestRecorder(store, source, "2026-10-03T12:00:00Z").WithRetention(15)
+
+	require.NoError(t, recorder.RecordOnce(context.Background()))
+
+	assert.Contains(t, store.storedDates(web), "2026-08-01", "history older than the source's is what DAILY_HISTORY_DAYS keeps")
+}
