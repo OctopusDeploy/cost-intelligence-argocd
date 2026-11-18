@@ -24,6 +24,7 @@ All notable changes to this project are listed here. The format follows [Keep a 
 - Volumes: claimed volumes no pod mounts are charged to the application that lists their PersistentVolumeClaim, and, when exactly one Application deploys to the namespace, every unmounted volume there is its. With several, the rest stays in the namespace's cost.
 - The Namespaces page lists the applications of the picked cluster only, not those of other clusters.
 - `GET /{appName}/month` and the status panel give the calendar month (UTC): what the application has cost so far, read from the daily history, so pods that no longer exist count, and the month projected at the average daily cost of the last 7 complete days. A job that ran once is a seventh of a day's run rate, not a run per day. The month is what the cloud bill covers.
+- The namespace view's application and controller rows show GPU, Storage and Network columns, like the application's controller list, when some row has that cost.
 
 ### Fixed
 

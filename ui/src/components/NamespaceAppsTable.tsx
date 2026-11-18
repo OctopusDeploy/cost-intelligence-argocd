@@ -6,13 +6,34 @@ import { cardStyle, useTokens } from '../theme/tokens';
 import { formatMoney, formatRelativeTime, isStale, pluralize, roundColumns, roundParts } from '../utils/format';
 import { NAME_COLUMN, SPACER_COLUMN } from '../utils/layout';
 import { AppCost } from '../utils/namespaceApps';
+import { ControllerGroup } from '../utils/podGroups';
 
-// Expand, application, CPU, memory, (shared,) total, share, measured, then a spacer. The application name
-// grows to 480px and the spacer takes any width beyond that (see NAME_COLUMN). The shared column is
-// there only when shared cost is counted in the totals.
-const columns = (shared: boolean) => `48px ${NAME_COLUMN} 104px 104px ${shared ? '104px ' : ''}116px 132px 140px ${SPACER_COLUMN}`;
-const MIN_TABLE_WIDTH = '844px';
+// Expand, application, CPU, memory, (GPU, storage, network, shared,) total, share, measured, then a
+// spacer. The application name grows to 480px and the spacer takes any width beyond that (see
+// NAME_COLUMN). An optional column is there only when some application has that cost, so the cells
+// beside a total add up to it.
+const columns = (optional: number) => `48px ${NAME_COLUMN} 104px 104px ${'104px '.repeat(optional)}116px 132px 140px ${SPACER_COLUMN}`;
+const minTableWidth = (optional: number) => `${844 + 104 * optional}px`;
 const TITLE_ID = 'cost-intel-namespace-apps-title';
+
+interface OptionalColumn {
+  label: string;
+  title: string;
+  app: (app: AppCost) => number;
+  controller: (controller: ControllerGroup) => number;
+}
+
+const OPTIONAL_COLUMNS: OptionalColumn[] = [
+  { label: 'GPU', title: 'GPU cost', app: a => a.gpuCost, controller: c => c.gpuCost },
+  { label: 'Storage', title: 'Persistent volume cost', app: a => a.storageCost, controller: c => c.storageCost },
+  { label: 'Network', title: 'Network and load balancer cost', app: a => a.networkCost, controller: c => c.networkCost },
+  {
+    label: 'Shared',
+    title: "Cost shared across the cluster, not the app's own usage",
+    app: a => a.sharedCost,
+    controller: c => c.sharedCost,
+  },
+];
 
 // appLink opens an application's Cost Intelligence view in Argo CD.
 const appLink = (app: AppCost) =>
@@ -33,7 +54,7 @@ interface Props {
 export const NamespaceAppsTable: React.FC<Props> = ({ apps, totalCost, unattributed = 0 }) => {
   const t = useTokens();
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
-  const hasShared = apps.some(app => app.sharedCost > 0);
+  const shown = OPTIONAL_COLUMNS.filter(column => apps.some(app => column.app(app) > 0));
 
   const toggle = (key: string) =>
     setExpanded(current => {
@@ -44,7 +65,7 @@ export const NamespaceAppsTable: React.FC<Props> = ({ apps, totalCost, unattribu
 
   const row: React.CSSProperties = {
     display: 'grid',
-    gridTemplateColumns: columns(hasShared),
+    gridTemplateColumns: columns(shown.length),
     alignItems: 'center',
     color: t.text,
     fontSize: '13px',
@@ -64,7 +85,7 @@ export const NamespaceAppsTable: React.FC<Props> = ({ apps, totalCost, unattribu
         detail="Each pod counts once, under the app that manages it · totals include storage and network"
       />
       <div style={{ overflowX: 'auto' }}>
-        <div role="table" aria-labelledby={TITLE_ID} style={{ minWidth: MIN_TABLE_WIDTH }}>
+        <div role="table" aria-labelledby={TITLE_ID} style={{ minWidth: minTableWidth(shown.length) }}>
           <div role="rowgroup">
             <div
               role="row"
@@ -88,11 +109,11 @@ export const NamespaceAppsTable: React.FC<Props> = ({ apps, totalCost, unattribu
               <span role="columnheader" style={numeric}>
                 Memory
               </span>
-              {hasShared && (
-                <span role="columnheader" style={numeric} title="Cost shared across the cluster, not the app's own usage">
-                  Shared
+              {shown.map(column => (
+                <span key={column.label} role="columnheader" style={numeric} title={column.title}>
+                  {column.label}
                 </span>
-              )}
+              ))}
               <span role="columnheader" style={numeric}>
                 Total
               </span>
@@ -118,8 +139,8 @@ export const NamespaceAppsTable: React.FC<Props> = ({ apps, totalCost, unattribu
               : 'Not listed by Argo CD';
             // Rounded so the cells beside each total add up to it, and the controllers to their app.
             const [appTotal] = roundParts([app.totalCost]);
-            const [appCpu, appRam, appShared = 0] = roundColumns(
-              hasShared ? [app.cpuCost, app.ramCost, app.sharedCost] : [app.cpuCost, app.ramCost],
+            const [appCpu, appRam, ...appOptional] = roundColumns(
+              [app.cpuCost, app.ramCost, ...shown.map(column => column.app(app))],
               app.totalCost,
               appTotal
             );
@@ -171,11 +192,11 @@ export const NamespaceAppsTable: React.FC<Props> = ({ apps, totalCost, unattribu
                   <span role="cell" style={numeric}>
                     {money(app, appRam)}
                   </span>
-                  {hasShared && (
-                    <span role="cell" style={numeric}>
-                      {money(app, appShared)}
+                  {shown.map((column, i) => (
+                    <span key={column.label} role="cell" style={numeric}>
+                      {money(app, appOptional[i])}
                     </span>
-                  )}
+                  ))}
                   <span role="cell" style={{ ...numeric, color: t.textStrong, fontWeight: 500 }}>
                     {money(app, appTotal)}
                   </span>
@@ -195,10 +216,8 @@ export const NamespaceAppsTable: React.FC<Props> = ({ apps, totalCost, unattribu
                 {open &&
                   app.controllers.map((controller, controllerIndex) => {
                     const controllerTotal = controllerTotals[controllerIndex];
-                    const [controllerCpu, controllerRam, controllerShared = 0] = roundColumns(
-                      hasShared
-                        ? [controller.cpuCost, controller.ramCost, controller.sharedCost]
-                        : [controller.cpuCost, controller.ramCost],
+                    const [controllerCpu, controllerRam, ...controllerOptional] = roundColumns(
+                      [controller.cpuCost, controller.ramCost, ...shown.map(column => column.controller(controller))],
                       controller.totalCost,
                       controllerTotal
                     );
@@ -221,11 +240,11 @@ export const NamespaceAppsTable: React.FC<Props> = ({ apps, totalCost, unattribu
                         <span role="cell" style={numeric}>
                           {formatMoney(controllerRam)}
                         </span>
-                        {hasShared && (
-                          <span role="cell" style={numeric}>
-                            {formatMoney(controllerShared)}
+                        {shown.map((column, i) => (
+                          <span key={column.label} role="cell" style={numeric}>
+                            {formatMoney(controllerOptional[i])}
                           </span>
-                        )}
+                        ))}
                         <span role="cell" style={numeric}>
                           {formatMoney(controllerTotal)}
                         </span>
@@ -256,11 +275,11 @@ export const NamespaceAppsTable: React.FC<Props> = ({ apps, totalCost, unattribu
                 <span role="cell" style={numeric}>
                   —
                 </span>
-                {hasShared && (
-                  <span role="cell" style={numeric}>
+                {shown.map(column => (
+                  <span key={column.label} role="cell" style={numeric}>
                     —
                   </span>
-                )}
+                ))}
                 <span role="cell" style={{ ...numeric, color: t.textStrong, fontWeight: 500 }}>
                   {formatMoney(unattributed)}
                 </span>

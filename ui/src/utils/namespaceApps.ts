@@ -24,6 +24,9 @@ export interface AppCost {
   podCount: number;
   cpuCost: number;
   ramCost: number;
+  gpuCost: number;
+  storageCost: number;
+  networkCost: number;
   sharedCost: number;
   totalCost: number;
   // share is the fraction (0–1) of the namespace's cost.
@@ -157,6 +160,9 @@ export function splitNamespaceByApp(
       podCount: controllers.reduce((sum, group) => sum + group.pods.length, 0),
       cpuCost: controllers.reduce((sum, group) => sum + group.cpuCost, 0),
       ramCost: controllers.reduce((sum, group) => sum + group.ramCost, 0),
+      gpuCost: controllers.reduce((sum, group) => sum + group.gpuCost, 0),
+      storageCost: controllers.reduce((sum, group) => sum + group.storageCost, 0),
+      networkCost: controllers.reduce((sum, group) => sum + group.networkCost, 0),
       sharedCost: controllers.reduce((sum, group) => sum + group.sharedCost, 0),
       totalCost: controllers.reduce((sum, group) => sum + group.totalCost, 0),
       share: 0,
