@@ -327,6 +327,65 @@
         "timeout": {
           "type": "string",
           "description": "OpenCost request timeout. A Go duration such as 10s or 5m."
+        },
+        "provider": {
+          "type": "string",
+          "enum": ["opencost", "kubecost"],
+          "description": "The service baseURL points at (COST_PROVIDER). Kubecost support is experimental."
+        },
+        "kubecostClusterID": {
+          "type": "string",
+          "description": "Kubecost only: this cluster's name in Kubecost (KUBECOST_CLUSTER_ID). Required with provider kubecost."
+        },
+        "discoverClusters": {
+          "type": "boolean",
+          "description": "Kubecost only: measure an Argo CD cluster registered under the name Kubecost uses (KUBECOST_DISCOVER_CLUSTERS)."
+        },
+        "eksOptimized": {
+          "type": "boolean",
+          "description": "Kubecost only: the EKS-optimized Kubecost keeps 15 days (KUBECOST_EKS_OPTIMIZED)."
+        },
+        "cloudCostURL": {
+          "type": "string",
+          "description": "Kubecost only: base URL of the service that answers /cloudCost/status, for the pricing source, for example the cloud-cost service (KUBECOST_CLOUD_COST_URL)."
+        },
+        "shareTenancyCosts": {
+          "type": "boolean",
+          "description": "Kubecost only: spread tenancy costs over the applications and count them in each cost (KUBECOST_SHARE_TENANCY_COSTS)."
+        },
+        "shareNamespaces": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Kubecost only: namespaces whose cost is spread over the applications and counted in each cost (KUBECOST_SHARE_NAMESPACES)."
+        },
+        "externalCosts": {
+          "type": "boolean",
+          "description": "Kubecost only: count the external cost Kubecost attributes to each allocation in what it costs (KUBECOST_EXTERNAL_COSTS)."
+        },
+        "apiKey": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Kubecost only: the API key of a protected aggregator, read from an existing Secret.",
+          "properties": {
+            "existingSecret": { "type": "string" },
+            "key": { "type": "string", "minLength": 1 },
+            "header": { "type": "string", "pattern": "^[A-Za-z0-9_-]+$" }
+          }
+        },
+        "kubecostClusters": {
+          "type": "array",
+          "description": "Kubecost only: the other clusters Argo CD deploys to, mapped to their name in Kubecost (KUBECOST_CLUSTER_MAP_FILE).",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id"],
+            "properties": {
+              "id": { "type": "string", "minLength": 1, "description": "The cluster's name in Kubecost." },
+              "server": { "type": "string", "description": "The destination's server URL in Argo CD." },
+              "name": { "type": "string", "description": "The destination's registered cluster name in Argo CD." }
+            },
+            "anyOf": [{ "required": ["server"] }, { "required": ["name"] }]
+          }
         }
       }
     },

@@ -7,11 +7,17 @@ What the figures on an application's **Cost Intelligence** tab mean, where they 
 After each successful sync, the service asks OpenCost what the application cost over the previous 24 hours and stores the result. The tab shows the latest measurement, and its header says when it was taken.
 
 - **Monthly figures** are projected onto a 30-day month from the hours OpenCost has data for. With less than a day of data, as for a new application, the header says "Projected from N hours of data". Less than 5 minutes of data is too little to project from, so a new application is first measured once OpenCost has 5 minutes of data for its namespace.
+- **A job that has ended.** A pod that no longer runs at the end of the 24 hours is projected from the whole window, not from its own run time: the window is taken as a day of the job's pattern, so a job that runs once a day shows 30 runs a month. A job that ran once shows more than it will cost. The month's real cost, from the first of the month, is in the **This month** figure below.
+- **Kubecost's adjustments.** Kubecost reconciles its estimates with the cloud bill and reports the correction beside each cost (`cpuCostAdjustment`, `networkCostAdjustment`, ...). The service adds them to the costs they adjust, so the figures match Kubecost's own.
 - **A sync shows in full a day later.** A measurement covers the 24 hours before it, so the one taken right after a sync mostly reflects the previous version. The Trends tab shows the change from the next day on.
 - **Measured at install.** An application without a measurement when the service starts is measured then, without waiting for a sync. Its next sync measures it again.
 - **Stale** marks a measurement 7 days old or more.
 
 An application shows no costs until its first measurement.
+
+### In Argo CD's status panel
+
+The application's monthly cost also shows in the status panel of the application page, next to Sync Status and Last Sync. It is the tab's Monthly cost: the Kubernetes cost plus the cloud estimate. The idle part of the CPU and memory requests is already inside the Kubernetes cost, so it is shown as detail ("incl. $X idle") and never added. The item is hidden for an application deploying to a cluster that isn't measured and until the first measurement.
 
 ### The application's own cost
 
@@ -25,8 +31,13 @@ A pod belongs to the application whose workload owns it. Some pods have no owner
 
 - **Operator-created workloads.** Pods of a StatefulSet or Deployment an operator creates (a database or message broker, for example) belong to the custom resource that Argo CD lists, found through the pod's labels. The built-in labels cover the common operators; [`OWNER_LABELS`](configuration.md#backend) adds others, and [`NON_OWNER_KINDS`](configuration.md#backend) names listed kinds that never own pods.
 - **Bare pods.** A pod with no controller, such as a CI job pod created by GitLab Runner or Airflow's Kubernetes executor, is charged to the only application deployed in its namespace when it carries one of the [`UNOWNED_POD_LABELS`](configuration.md#backend). For example, `project.runner.gitlab.com/name` charges GitLab Runner's job pods to the application that deploys the runner. Nothing is attributed this way until you set a label. With several applications in the namespace, such a pod stays in the namespace's cost: each of them would claim it. Each pod is counted once, under one application.
+- **Kubecost** reports pods without a controller. They are matched to their Deployment, Rollout, StatefulSet, DaemonSet or Job by the shape of their name.
 
-Pods that still belong to no application stay in the namespace's cost.
+Pods that still belong to no application stay in the namespace's cost and show as unmanaged in the namespace view.
+
+#### Volumes
+
+A volume mounted by a pod is part of that pod's cost. A claimed volume that no pod mounts, such as a build cache between two jobs, is charged to the application that lists its PersistentVolumeClaim. When one application is the only one deploying to a namespace, it also owns every other unmounted volume there. With several applications, the unmounted volumes they don't list stay in the namespace's cost, so an application is never charged for another's.
 
 #### Grouping job pods
 
@@ -39,6 +50,7 @@ An application with thousands of short-lived pods, such as CI jobs, lists them g
 | Figure | Meaning |
 |---|---|
 | Monthly cost | The application's Kubernetes cost per month, plus its [cloud services estimate](installation.md#optional-cloud-service-costs) when CI pushes one. |
+| This month | The calendar month (UTC), which is what the cloud bill covers: the large figure is the month projected, the detail what the application has cost so far. Both come from the [daily history](#trends), so pods that no longer exist count. Shown once there is history. |
 | Since last sync | The change in Kubernetes cost from the measurement at the previous sync. Empty for a measurement at install, which has no sync to compare with. |
 | Idle spend | The part of the monthly CPU and memory cost paid for requested capacity the pods didn't use: per pod, `cost x (request - usage) / request`, and nothing for a pod using at least its request. |
 | Pricing | Whether OpenCost prices resources with your cloud provider's prices (Real) or public list prices (Estimated). Unknown when the service can't ask OpenCost. |
@@ -74,6 +86,10 @@ Ranges run from 30 days to a year, this month or last month, or a custom range o
 **Month-end forecast** is what the month has cost so far plus a straight-line trend of the last 30 days to the end of the month. It needs 7 complete days of data and shows when the range includes today.
 
 A day with no cost means OpenCost reported nothing for it: the application's pods weren't running, or OpenCost no longer had that day when it was first recorded.
+
+Kubecost keeps hourly data for a few days, then one entry per day, then one per month. An entry covering more than a day is skipped and not stored as one day's cost, so the recorded history reaches back as far as Kubecost keeps daily data.
+
+**This month** (on Actual costs) is the calendar month in UTC. What it has cost so far is the sum of the recorded days from the 1st, today included. The month is projected as the days so far, plus today and the days left at the average daily cost of the last 7 complete days. A day with no cost counts as zero in that average, so a job that ran once in the week is a seventh of a day's cost, and it starts no earlier than the application's first recorded day. An application with no history shows no This month figure.
 
 <!-- The plugin links to this heading. Don't rename or move it without a redirect. -->
 ## Applications on another cluster
