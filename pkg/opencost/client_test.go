@@ -1332,3 +1332,18 @@ func TestGetClusterOverhead_Non200Response(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "500")
 }
+
+// The parts of the network cost shrink with the adjustment, so they still add up to it.
+func TestAllocationData_ScalesNetworkPartsWithTheirAdjustment(t *testing.T) {
+	t.Parallel()
+
+	var got AllocationData
+	require.NoError(t, json.Unmarshal([]byte(`{
+		"networkCost": 7.77333, "networkCrossZoneCost": 7.77286, "networkInternetCost": 0.00047,
+		"networkCostAdjustment": -7.77318
+	}`), &got))
+
+	assert.InDelta(t, 0.00015, got.NetworkCost, 1e-9)
+	assert.InDelta(t, got.NetworkCost, got.NetworkCrossZoneCost+got.NetworkInternetCost, 1e-9)
+	assert.Less(t, got.NetworkCrossZoneCost, 0.001)
+}

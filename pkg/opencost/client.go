@@ -255,6 +255,16 @@ func (a *AllocationData) UnmarshalJSON(data []byte) error {
 	a.GPUCost += aux.GPUAdjustment
 	a.RAMCost += aux.RAMAdjustment
 	a.PVCost += aux.PVAdjustment
+	// The network adjustment corrects the whole network cost, so its parts (cross-zone, cross-region,
+	// internet, NAT) shrink in the same proportion and still add up to it.
+	if raw := a.NetworkCost; raw > 0 && aux.NetworkAdjustment != 0 {
+		scale := math.Max(0, raw+aux.NetworkAdjustment) / raw
+		a.NetworkCrossZoneCost *= scale
+		a.NetworkCrossRegionCost *= scale
+		a.NetworkInternetCost *= scale
+		a.NetworkNatGatewayEgressCost *= scale
+		a.NetworkNatGatewayIngressCost *= scale
+	}
 	a.NetworkCost += aux.NetworkAdjustment
 	a.LoadBalancerCost += aux.LBAdjustment
 	return nil
@@ -620,6 +630,22 @@ type SummaryAllocationData struct {
 	RAMByteUsageAverage   float64   `json:"ramByteUsageAverage"`
 	RAMByteLimitAverage   float64   `json:"ramByteLimitAverage"`
 	RAMCost               float64   `json:"ramCost"`
+}
+
+// UnmarshalJSON folds the CPU and memory cost adjustments into their costs, as AllocationData does.
+func (s *SummaryAllocationData) UnmarshalJSON(data []byte) error {
+	type plain SummaryAllocationData
+	aux := struct {
+		*plain
+		CPUAdjustment float64 `json:"cpuCostAdjustment"`
+		RAMAdjustment float64 `json:"ramCostAdjustment"`
+	}{plain: (*plain)(s)}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	s.CPUCost += aux.CPUAdjustment
+	s.RAMCost += aux.RAMAdjustment
+	return nil
 }
 
 func (c *Client) GetNamespaceSummary(ctx context.Context, namespace string) (*models.EfficiencyMetrics, error) {
