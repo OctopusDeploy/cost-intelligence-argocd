@@ -25,6 +25,9 @@ RUN npm install -g --prefix /opt/http-server http-server@14.1.1
 # Runtime stage - serve plugin from static server
 FROM node:22-alpine
 
+# Pick up the base image's security fixes (zlib) that its tag has not been rebuilt with yet.
+RUN apk upgrade --no-cache zlib
+
 WORKDIR /app
 
 COPY --from=server /opt/http-server /opt/http-server

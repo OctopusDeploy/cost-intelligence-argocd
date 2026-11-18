@@ -4,11 +4,40 @@ import { cardStyle, Tokens, useTokens } from '../theme/tokens';
 import { formatMoney, formatPercent, roundColumns, roundParts } from '../utils/format';
 import { NAME_COLUMN, SPACER_COLUMN } from '../utils/layout';
 import { ControllerGroup } from '../utils/podGroups';
+import { PodCost } from '../utils/api';
 
-// Expand, controller, kind, pods, CPU, memory, total, share, then a spacer. The controller name
-// grows to 480px and the spacer takes any width beyond that (see NAME_COLUMN).
-const COLUMNS = `48px ${NAME_COLUMN} 112px 56px 104px 104px 104px 132px ${SPACER_COLUMN}`;
+// Expand, controller, kind, pods, CPU, memory, (GPU, storage, network, shared, external,) total, share, then a spacer.
+// The controller name grows to 480px and the spacer takes any width beyond that (see NAME_COLUMN). An
+// optional column is there only when some controller has that cost, so the cells beside a total add up
+// to it.
+const columns = (optional: number) =>
+  `48px ${NAME_COLUMN} 112px 56px 104px 104px ${'104px '.repeat(optional)}104px 132px ${SPACER_COLUMN}`;
 const MIN_TABLE_WIDTH = '820px';
+
+interface OptionalColumn {
+  label: string;
+  title: string;
+  group: (group: ControllerGroup) => number;
+  pod: (pod: PodCost) => number;
+}
+
+const OPTIONAL_COLUMNS: OptionalColumn[] = [
+  { label: 'GPU', title: 'GPU cost', group: g => g.gpuCost, pod: p => p.gpuCost ?? 0 },
+  { label: 'Storage', title: 'Persistent volume cost', group: g => g.storageCost, pod: p => p.storageCost ?? 0 },
+  { label: 'Network', title: 'Network and load balancer cost', group: g => g.networkCost, pod: p => p.networkCost ?? 0 },
+  {
+    label: 'Shared',
+    title: "Cost shared across the cluster, not this controller's own usage",
+    group: g => g.sharedCost,
+    pod: p => p.sharedCost ?? 0,
+  },
+  {
+    label: 'External',
+    title: 'External cost: cloud services attributed to this controller',
+    group: g => g.externalCost,
+    pod: p => p.externalCost ?? 0,
+  },
+];
 
 const plural = (count: number, noun: string) => `${count} ${noun}${count === 1 ? '' : 's'}`;
 
@@ -23,6 +52,7 @@ export const ControllerCostTable: React.FC<Props> = ({ groups }) => {
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
   const total = groups.reduce((sum, group) => sum + group.totalCost, 0);
   const podCount = groups.reduce((sum, group) => sum + group.pods.length, 0);
+  const shown = OPTIONAL_COLUMNS.filter(column => groups.some(group => column.group(group) > 0));
 
   const toggle = (key: string) =>
     setExpanded(current => {
@@ -33,7 +63,7 @@ export const ControllerCostTable: React.FC<Props> = ({ groups }) => {
 
   const row: React.CSSProperties = {
     display: 'grid',
-    gridTemplateColumns: COLUMNS,
+    gridTemplateColumns: columns(shown.length),
     alignItems: 'center',
     color: t.text,
     fontSize: '13px',
@@ -79,6 +109,11 @@ export const ControllerCostTable: React.FC<Props> = ({ groups }) => {
               <span role="columnheader" style={numeric}>
                 Memory
               </span>
+              {shown.map(column => (
+                <span key={column.label} role="columnheader" style={numeric} title={column.title}>
+                  {column.label}
+                </span>
+              ))}
               <span role="columnheader" style={numeric}>
                 Total
               </span>
@@ -93,7 +128,11 @@ export const ControllerCostTable: React.FC<Props> = ({ groups }) => {
             const groupId = `cost-intel-controller-${index}`;
             // Rounded so the cells beside each total add up to it, and the pods to their controller.
             const [groupTotal] = roundParts([group.totalCost]);
-            const [groupCpu, groupRam] = roundColumns([group.cpuCost, group.ramCost], group.totalCost, groupTotal);
+            const [groupCpu, groupRam, ...groupOptional] = roundColumns(
+              [group.cpuCost, group.ramCost, ...shown.map(column => column.group(group))],
+              group.totalCost,
+              groupTotal
+            );
             const podTotals = roundParts(group.pods.map(pod => pod.totalCost), groupTotal);
             return (
               <div key={group.key} id={groupId} role="rowgroup" style={{ ...cardStyle(t), margin: '8px 0', overflow: 'hidden' }}>
@@ -141,6 +180,11 @@ export const ControllerCostTable: React.FC<Props> = ({ groups }) => {
                   <span role="cell" style={numeric}>
                     {formatMoney(groupRam)}
                   </span>
+                  {shown.map((column, i) => (
+                    <span key={column.label} role="cell" style={numeric}>
+                      {formatMoney(groupOptional[i])}
+                    </span>
+                  ))}
                   <span role="cell" style={{ ...numeric, color: t.textStrong, fontWeight: 500 }}>
                     {formatMoney(groupTotal)}
                   </span>
@@ -152,7 +196,11 @@ export const ControllerCostTable: React.FC<Props> = ({ groups }) => {
                 {open &&
                   group.pods.map((pod, podIndex) => {
                     const podTotal = podTotals[podIndex];
-                    const [podCpu, podRam] = roundColumns([pod.cpuCost, pod.ramCost], pod.totalCost, podTotal);
+                    const [podCpu, podRam, ...podOptional] = roundColumns(
+                      [pod.cpuCost, pod.ramCost, ...shown.map(column => column.pod(pod))],
+                      pod.totalCost,
+                      podTotal
+                    );
                     return (
                       <div
                         key={pod.name}
@@ -173,6 +221,11 @@ export const ControllerCostTable: React.FC<Props> = ({ groups }) => {
                         <span role="cell" style={numeric}>
                           {formatMoney(podRam)}
                         </span>
+                        {shown.map((column, i) => (
+                          <span key={column.label} role="cell" style={numeric}>
+                            {formatMoney(podOptional[i])}
+                          </span>
+                        ))}
                         <span role="cell" style={numeric}>
                           {formatMoney(podTotal)}
                         </span>

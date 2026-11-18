@@ -9,6 +9,9 @@ type CostActual struct {
 	ApplicationName      string `json:"applicationName"`
 	ApplicationNamespace string `json:"applicationNamespace"`
 	DeploymentNamespace  string `json:"deploymentNamespace"`
+	// Cluster is the cluster of the cost backend the record was measured in (its id; empty when the
+	// backend measures only its own, and for records stored before it was recorded).
+	Cluster string `json:"cluster,omitempty"`
 	// SyncTimestamp is when the sync that triggered the measurement finished. Zero for a measurement
 	// taken at install, which follows no sync.
 	SyncTimestamp time.Time `json:"syncTimestamp,omitzero"`
@@ -33,6 +36,10 @@ type CostActual struct {
 	// notifications template that does not send the application's resources. Stored, never sent: the
 	// application routes send ForApplication's view instead.
 	App *AppMeasurement `json:"-"`
+	// OwnedPods are the pods the application's measurement owns, by the backend's own rules (labels
+	// included). Set only on the namespace routes, whose clients split a namespace's pods by application
+	// and must not guess the owners again.
+	OwnedPods []OwnedPod `json:"ownedPods,omitempty"`
 	// Scope says what the cost fields describe: ScopeApplication or ScopeNamespace. Set only by
 	// ForApplication.
 	Scope string `json:"scope,omitempty"`
@@ -82,6 +89,27 @@ type AppMeasurement struct {
 	OpenCostOutput   OpenCostMetrics    `json:"opencostOutput"`
 	Efficiency       *EfficiencyMetrics `json:"efficiency,omitempty"`
 	Pods             []PodCost          `json:"pods"`
+}
+
+// OwnedPod identifies a pod an application's measurement owns.
+type OwnedPod struct {
+	Name           string `json:"name"`
+	Controller     string `json:"controller,omitempty"`
+	ControllerKind string `json:"controllerKind,omitempty"`
+}
+
+// WithOwnedPods returns the record with the pods its application's measurement owns listed. A pod's
+// controller is listed once, so the controllers of pods that have come and gone since are still known.
+func (a CostActual) WithOwnedPods() CostActual {
+	if a.App == nil {
+		return a
+	}
+	view := a
+	view.OwnedPods = make([]OwnedPod, 0, len(a.App.Pods))
+	for _, p := range a.App.Pods {
+		view.OwnedPods = append(view.OwnedPods, OwnedPod{Name: p.Name, Controller: p.Controller, ControllerKind: p.ControllerKind})
+	}
+	return view
 }
 
 // ForApplication returns the record as the application sees it: its own cost, breakdown,
@@ -152,13 +180,19 @@ type DataQuality struct {
 
 // NamespaceSummary describes a deployment namespace by its most recent measurement.
 type NamespaceSummary struct {
-	Namespace string  `json:"namespace"`
+	Namespace string `json:"namespace"`
+	// Cluster is the cluster of the cost backend the namespace was measured in; empty when the
+	// backend measures only its own, and for records stored before it was recorded.
+	Cluster   string  `json:"cluster,omitempty"`
 	TotalCost float64 `json:"totalCost"`
 	// IdleCost is the requested-but-unused CPU and memory cost from the same measurement. Nil when
 	// that measurement did not measure it.
 	IdleCost   *float64  `json:"idleCost"`
 	AppCount   int       `json:"appCount"`
 	MeasuredAt time.Time `json:"measuredAt"`
+	// Clusters are the clusters the Applications deploying to the namespace run on, in the cost backend's
+	// names. Set only when the backend measures several.
+	Clusters []string `json:"clusters,omitempty"`
 }
 
 type PodCost struct {
@@ -168,7 +202,23 @@ type PodCost struct {
 	ControllerKind string  `json:"controllerKind"`
 	CPUCost        float64 `json:"cpuCost"`
 	RAMCost        float64 `json:"ramCost"`
-	TotalCost      float64 `json:"totalCost"`
+	// StorageCost, NetworkCost (load balancers included) and GPUCost are the rest of what the pod
+	// costs besides CPU and memory. They are omitted when zero, and records stored before they were
+	// kept have none.
+	StorageCost float64 `json:"storageCost,omitempty"`
+	NetworkCost float64 `json:"networkCost,omitempty"`
+	GPUCost     float64 `json:"gpuCost,omitempty"`
+	// SharedCost is the part of TotalCost that is shared cost spread over the pod (set only when
+	// shared costs are included), not the pod's own usage.
+	SharedCost float64 `json:"sharedCost,omitempty"`
+	// ExternalCost is the part of TotalCost that is external cost (cloud services Kubecost attributes to
+	// the pod), set only when external costs are included.
+	ExternalCost float64 `json:"externalCost,omitempty"`
+	TotalCost    float64 `json:"totalCost"`
+	// Group is the value of the configured grouping labels (UNMANAGED_GROUP_LABELS), for listing the
+	// pods no Argo CD application manages by team or project. Presentation only: it never decides
+	// which application owns a pod.
+	Group string `json:"group,omitempty"`
 }
 
 type OrphanedPod struct {
@@ -180,6 +230,8 @@ type OrphanedPod struct {
 	RAMCost        float64 `json:"ramCost"`
 	StorageCost    float64 `json:"storageCost"`
 	TotalCost      float64 `json:"totalCost"`
+	// Labels are the pod's, for the ownership rules that read them. Never sent.
+	Labels map[string]string `json:"-"`
 }
 
 type EfficiencyMetrics struct {
@@ -223,20 +275,28 @@ type OpenCostMetrics struct {
 }
 
 type AllocationTotal struct {
-	CPUCost                float64            `json:"cpuCost"`
-	MemoryCost             float64            `json:"memoryCost"`
-	StorageCost            float64            `json:"storageCost"`
-	GPUCost                float64            `json:"gpuCost"`
-	NetworkCost            float64            `json:"networkCost"`
-	NetworkCrossZoneCost   float64            `json:"networkCrossZoneCost,omitempty"`
-	NetworkCrossRegionCost float64            `json:"networkCrossRegionCost,omitempty"`
-	NetworkInternetCost    float64            `json:"networkInternetCost,omitempty"`
-	NetworkNatGatewayCost  float64            `json:"networkNatGatewayCost,omitempty"`
-	LoadBalancerCost       float64            `json:"loadBalancerCost"`
-	TotalCost              float64            `json:"totalCost"`
-	CarbonCost             float64            `json:"carbonCost"`
-	SharedCost             float64            `json:"sharedCost,omitempty"`
-	SharedCostBreakdown    map[string]float64 `json:"sharedCostBreakdown,omitempty"`
+	CPUCost                float64 `json:"cpuCost"`
+	MemoryCost             float64 `json:"memoryCost"`
+	StorageCost            float64 `json:"storageCost"`
+	GPUCost                float64 `json:"gpuCost"`
+	NetworkCost            float64 `json:"networkCost"`
+	NetworkCrossZoneCost   float64 `json:"networkCrossZoneCost,omitempty"`
+	NetworkCrossRegionCost float64 `json:"networkCrossRegionCost,omitempty"`
+	NetworkInternetCost    float64 `json:"networkInternetCost,omitempty"`
+	NetworkNatGatewayCost  float64 `json:"networkNatGatewayCost,omitempty"`
+	LoadBalancerCost       float64 `json:"loadBalancerCost"`
+	TotalCost              float64 `json:"totalCost"`
+	CarbonCost             float64 `json:"carbonCost"`
+	SharedCost             float64 `json:"sharedCost,omitempty"`
+	// ExternalCost is what Kubecost attributes to the allocations from outside the cluster (cloud
+	// services matched from the bill). Reported always; part of TotalCost only when ExternalCostIncluded
+	// (KUBECOST_EXTERNAL_COSTS), as the cloud services estimate may already cover them.
+	ExternalCost         float64 `json:"externalCost,omitempty"`
+	ExternalCostIncluded bool    `json:"externalCostIncluded,omitempty"`
+	// SharedCostIncluded says SharedCost is part of TotalCost (it was asked for: tenancy costs or shared
+	// namespaces). Otherwise SharedCost is only reported and TotalCost leaves it out.
+	SharedCostIncluded  bool               `json:"sharedCostIncluded,omitempty"`
+	SharedCostBreakdown map[string]float64 `json:"sharedCostBreakdown,omitempty"`
 }
 
 type DailyCost struct {
@@ -264,7 +324,11 @@ type ChargebackEntry struct {
 	StorageCost float64 `json:"storageCost"`
 	NetworkCost float64 `json:"networkCost"`
 	LBCost      float64 `json:"lbCost"`
-	TotalCost   float64 `json:"totalCost"`
+	// SharedCost and ExternalCost are the parts of TotalCost that are shared and external cost, set
+	// only when those are counted.
+	SharedCost   float64 `json:"sharedCost,omitempty"`
+	ExternalCost float64 `json:"externalCost,omitempty"`
+	TotalCost    float64 `json:"totalCost"`
 	// Efficiency is how much of their CPU and memory requests the label value's pods use, weighted
 	// by cost; 0 when not measured or when NoRequests.
 	Efficiency float64 `json:"efficiency"`

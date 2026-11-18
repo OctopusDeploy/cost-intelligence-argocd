@@ -63,6 +63,20 @@ describe('splitNamespaceByApp', () => {
     expect(totalCost).toBeCloseTo(2030.1);
   });
 
+  it('lists pods the backend grouped by label as their own rows, after the ungrouped ones', () => {
+    const job = (name: string, group: string | undefined, cost: number): PodCost => ({ ...pod(name, '', cost), controllerKind: 'Pod', group });
+    const pods = [...snapshot, job('runner-a', 'design / git-cleaner', 10), job('runner-b', 'design / git-cleaner', 5), job('runner-c', 'infra', 50), job('debug', undefined, 1)];
+    const { apps, totalCost } = splitNamespaceByApp('argocd', [record('redis', '2026-09-01T14:57:05Z', pods)], argoApps);
+
+    expect(apps.map(app => [app.name, app.group, app.podCount])).toEqual([
+      ['redis', undefined, 1],
+      [null, undefined, 2], // guestbook-ui (its app has no record here) and debug
+      [null, 'infra', 1],
+      [null, 'design / git-cleaner', 2],
+    ]);
+    expect(totalCost).toBeCloseTo(1642.5 + 375.6 + 1 + 50 + 15);
+  });
+
   it('lists an app Argo CD did not return with no pods, and counts its pods as unmanaged', () => {
     const { apps } = splitNamespaceByApp('argocd', records, [argoApps[0]]);
 
@@ -99,7 +113,50 @@ describe('splitNamespaceByApp', () => {
     expect(apps.find(app => app.name === 'test-app')?.controllers.map(group => group.name)).toEqual(['guestbook-ui']);
   });
 
+  it('gives an application the pods the backend lists as its own, whatever their kind', () => {
+    const operator = [
+      { ...pod('chi-clickhouse-0-0-0', 'chi-clickhouse-0-0', 40), controllerKind: 'StatefulSet' },
+      { ...pod('airflow-worker-xyz', '', 7), controllerKind: '' },
+      pod('stray-1', 'stray', 3),
+    ];
+    const owned = {
+      ...record('redis', '2026-09-01T14:57:05Z', operator),
+      ownedPods: [{ name: 'chi-clickhouse-0-0-0', controller: 'chi-clickhouse-0-0', controllerKind: 'StatefulSet' }, { name: 'airflow-worker-xyz' }],
+    };
+    const { apps } = splitNamespaceByApp('argocd', [owned], [argoApp('redis', [deployment('redis')])]);
+
+    expect(apps.map(app => [app.name, app.podCount])).toEqual([
+      ['redis', 2],
+      [null, 1],
+    ]);
+  });
+
   it('returns nothing without records', () => {
     expect(splitNamespaceByApp('argocd', [], argoApps)).toEqual({ apps: [], totalCost: 0, latest: null });
+  });
+});
+
+describe('splitNamespaceByApp with pods reported without a controller', () => {
+  it('attaches them by the shape of their name and groups them under the controller', () => {
+    const bare = (name: string): PodCost => ({ ...pod(name, '', 10), controllerKind: '' });
+    const stg = [record('studio', '2026-09-01T14:57:05Z', [bare('core-58c7cc68c8-8xz4n'), bare('core-58c7cc68c8-tjzlt'), bare('other-58c7cc68c8-aaaaa')])];
+    const apps = [argoApp('studio', [deployment('core')])];
+
+    const { apps: result } = splitNamespaceByApp('argocd', stg, apps);
+
+    expect(result.map(app => [app.name, app.podCount, app.controllers.map(group => group.key)])).toEqual([
+      ['studio', 2, ['Deployment/core']],
+      [null, 1, ['Pod/other-58c7cc68c8-aaaaa']],
+    ]);
+  });
+
+  it('attaches the pods of a CloudNativePG Cluster, reported with or without their controller', () => {
+    const owned = { ...pod('pg-1', 'pg', 5), controllerKind: 'Cluster' };
+    const bare = { ...pod('pg-2', '', 5), controllerKind: '' };
+    const { apps } = splitNamespaceByApp('argocd', [record('db', '2026-09-01T14:57:05Z', [owned, bare])], [
+      argoApp('db', [{ kind: 'Cluster', name: 'pg', namespace: 'argocd' }]),
+    ]);
+
+    expect(apps.map(app => [app.name, app.podCount])).toEqual([['db', 2]]);
   });
 });

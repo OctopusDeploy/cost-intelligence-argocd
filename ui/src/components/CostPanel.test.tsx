@@ -28,6 +28,7 @@ function withMeasurementAge(days: number, measuredHours?: number, record: Partia
       ...record,
     } as CostData,
     trend: null,
+    month: null,
     dailyCosts: [
       {
         date: '2026-09-15',

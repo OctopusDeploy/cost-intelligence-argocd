@@ -34,6 +34,7 @@ export interface RangeView {
   setCustom: (range: DayRange) => void;
   // The chosen range's own series; the 30-day range uses the tab's series instead.
   dailyCosts: DailyCost[] | null;
+  weeklyOnly?: boolean;
   loading: boolean;
   error: string | null;
 }
@@ -83,7 +84,7 @@ export const CostTrendComponent: React.FC<CostTrendProps> = ({ loading, error, d
   const data = fromFirstCost(inRange);
   const reachesToday = !range || includesToday(shown, today);
   const showForecast = reachesToday ? forecast : null;
-  const unit = range ? granularity(shown) : 'day';
+  const unit = range ? granularity(shown, range.weeklyOnly) : 'day';
   // Today is still being measured, and so was the first day measured, so either would read as the
   // cheapest day: the per-day figures leave them out, while the total, which is money already
   // spent, keeps them.

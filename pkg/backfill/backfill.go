@@ -83,11 +83,22 @@ type Backfill struct {
 	logger      *log.Logger
 	// pruneRemote deletes the stored cost of the Applications deploying to another cluster.
 	pruneRemote bool
+	// scope says which cluster of the cost backend each Application is measured in.
+	scope exporter.Scope
 }
+
+// unit is what one measurement covers: a namespace of one cluster of the cost backend.
+type unit struct{ cluster, namespace string }
 
 // New returns a backfill measuring up to concurrency namespaces at once.
 func New(apps exporter.ApplicationLister, store Store, client *opencost.Client, concurrency int, logger *log.Logger) *Backfill {
-	return &Backfill{apps: apps, store: store, client: client, concurrency: max(concurrency, 1), logger: logger}
+	return &Backfill{apps: apps, store: store, client: client, concurrency: max(concurrency, 1), logger: logger, scope: exporter.LocalOnly{}}
+}
+
+// WithScope has the backfill measure the clusters scope maps, instead of only the one Argo CD runs in.
+func (b *Backfill) WithScope(scope exporter.Scope) *Backfill {
+	b.scope = scope
+	return b
 }
 
 // PruneRemote has each run also delete the stored cost of the Applications that deploy to another
@@ -118,7 +129,7 @@ func (b *Backfill) Run(ctx context.Context) (Result, error) {
 	}
 
 	var result Result
-	byNamespace, stale := pending(apps, recorded, &result)
+	byNamespace, stale := b.pending(apps, recorded, &result)
 	if !b.pruneRemote {
 		stale = nil
 	}
@@ -135,18 +146,23 @@ func (b *Backfill) Run(ctx context.Context) (Result, error) {
 			result.Removed++
 		}
 	}
-	namespaces := make([]string, 0, len(byNamespace))
-	for ns := range byNamespace {
-		namespaces = append(namespaces, ns)
+	units := make([]unit, 0, len(byNamespace))
+	for u := range byNamespace {
+		units = append(units, u)
 	}
-	sort.Strings(namespaces)
+	sort.Slice(units, func(i, j int) bool {
+		if units[i].cluster != units[j].cluster {
+			return units[i].cluster < units[j].cluster
+		}
+		return units[i].namespace < units[j].namespace
+	})
 
 	var (
 		mu  sync.Mutex
 		wg  sync.WaitGroup
 		sem = make(chan struct{}, b.concurrency)
 	)
-	for _, ns := range namespaces {
+	for _, u := range units {
 		select {
 		case sem <- struct{}{}:
 		case <-ctx.Done():
@@ -159,7 +175,7 @@ func (b *Backfill) Run(ctx context.Context) (Result, error) {
 				<-sem
 				wg.Done()
 			}()
-			counts := b.measure(ctx, ns, byNamespace[ns])
+			counts := b.measure(ctx, u, byNamespace[u], apps)
 			mu.Lock()
 			result.add(counts)
 			mu.Unlock()
@@ -197,17 +213,18 @@ func (b *Backfill) RunWithRetries(ctx context.Context, delays []time.Duration, r
 // pending groups the Applications to measure by the namespace they deploy to, and counts the others in
 // result by why they are left out. stale are the Applications deploying to another cluster that have
 // a cost record anyway, stored before such Applications were skipped.
-func pending(apps []exporter.Application, recorded []models.CostActual, result *Result) (byNamespace map[string][]exporter.Application, stale []models.AppRef) {
+func (b *Backfill) pending(apps []exporter.Application, recorded []models.CostActual, result *Result) (byNamespace map[unit][]exporter.Application, stale []models.AppRef) {
 	has := make(map[models.AppRef]bool, len(recorded))
 	for _, r := range recorded {
 		has[models.AppRef{Namespace: r.ApplicationNamespace, Name: r.ApplicationName}] = true
 	}
-	byNamespace = map[string][]exporter.Application{}
+	byNamespace = map[unit][]exporter.Application{}
 	for _, app := range apps {
+		cluster, measurable := b.scope.ClusterFor(app.Destination)
 		switch ns := app.Destination.Namespace; {
-		case !app.Destination.Local():
-			// OpenCost measures the cluster it runs in; another cluster's namespace of the same name
-			// would be measured here.
+		case !measurable:
+			// The cost backend measures the clusters it is mapped to; another cluster's namespace of
+			// the same name would be measured instead.
 			result.Remote++
 			if has[app.Ref] {
 				stale = append(stale, app.Ref)
@@ -218,16 +235,18 @@ func pending(apps []exporter.Application, recorded []models.CostActual, result *
 			// The sync hook falls back to the Application's own namespace, where it does not deploy.
 			result.NoNamespace++
 		default:
-			byNamespace[ns] = append(byNamespace[ns], app)
+			byNamespace[unit{cluster, ns}] = append(byNamespace[unit{cluster, ns}], app)
 		}
 	}
 	return byNamespace, stale
 }
 
-// measure measures one namespace and saves the first record of each Application deploying there.
-func (b *Backfill) measure(ctx context.Context, namespace string, apps []exporter.Application) Result {
+// measure measures one namespace and saves the first record of each Application deploying there. all
+// are every Application, to tell whether one is the only one deploying to the namespace.
+func (b *Backfill) measure(ctx context.Context, u unit, apps, all []exporter.Application) Result {
 	var result Result
-	measured, err := hook.MeasureNamespace(ctx, b.client, namespace, b.logger)
+	namespace := u.namespace
+	measured, err := hook.MeasureNamespace(opencost.WithCluster(ctx, u.cluster), b.client, namespace, b.logger)
 	if err != nil {
 		b.logger.Printf("Backfill: measuring namespace %s: %v", namespace, err)
 		result.Failed = len(apps)
@@ -238,6 +257,8 @@ func (b *Backfill) measure(ctx context.Context, namespace string, apps []exporte
 		result.NoData = len(apps)
 		return result
 	}
+	_, sole := exporter.SoleApplication(all, b.scope, u.cluster, namespace)
+	measured.SoleApplication(sole)
 	for _, app := range apps {
 		owners := app.Workloads
 		if owners == nil {

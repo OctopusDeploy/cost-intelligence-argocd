@@ -9,6 +9,8 @@ import { useDataQuality } from '../hooks/useDataQuality';
 import { UseNamespaceDataResult, useNamespaceData } from '../hooks/useNamespaceData';
 import { useOrphanedPods } from '../hooks/useOrphanedPods';
 import { useWasteRanking } from '../hooks/useWasteRanking';
+import { useClusters } from '../hooks/useClusters';
+import api from '../utils/api';
 import { CostData, PodCost } from '../utils/api';
 
 vi.mock('../hooks/useNamespaceData', () => ({ useNamespaceData: vi.fn() }));
@@ -18,6 +20,11 @@ vi.mock('../hooks/useDataQuality', () => ({ useDataQuality: vi.fn() }));
 vi.mock('../hooks/useOrphanedPods', () => ({ useOrphanedPods: vi.fn() }));
 vi.mock('../hooks/useChargeback', () => ({ useChargeback: vi.fn() }));
 vi.mock('../hooks/useWasteRanking', () => ({ useWasteRanking: vi.fn() }));
+vi.mock('../hooks/useClusters', () => ({ useClusters: vi.fn() }));
+vi.mock('../utils/api', async importOriginal => {
+  const actual = await importOriginal<typeof import('../utils/api')>();
+  return { ...actual, default: { ...actual.default, setCluster: vi.fn(), setClusterFilter: vi.fn() } };
+});
 
 const DAY_MS = 86_400_000;
 const measuredAt = new Date(Date.now() - 2 * DAY_MS).toISOString();
@@ -112,6 +119,7 @@ describe('NamespaceDashboard', () => {
     vi.mocked(useOrphanedPods).mockReturnValue({ pods: [], loading: false });
     vi.mocked(useChargeback).mockReturnValue({ entries: [], totalCost: 0, loading: false, error: null });
     reloadWaste.mockClear();
+    vi.mocked(useClusters).mockReturnValue([]);
     vi.mocked(useWasteRanking).mockReturnValue({
       ranking: {
         apps: [
@@ -139,7 +147,7 @@ describe('NamespaceDashboard', () => {
   it('summarises the cluster and explains a missing control plane fee', () => {
     render(<NamespaceDashboard />);
 
-    expect(stat('Cluster monthly cost')).toEqual({ value: '$2,883.60', detail: '2 namespaces · 3 apps' });
+    expect(stat('Cluster monthly cost')).toEqual({ value: '$2,883.60', detail: '2 namespaces · 3 apps · last 24 h × 30 days' });
     expect(stat('Control plane fee')).toEqual({ value: 'Not available', detail: "OpenCost didn't return cluster assets" });
     expect(stat('Pricing').value).toBe('Estimated');
   });
@@ -412,5 +420,85 @@ describe('NamespaceDashboard', () => {
     withNamespaceData({ namespaces: [] });
     rerender(<NamespaceDashboard />);
     expect(screen.getByText(/No cost data yet/)).toBeTruthy();
+  });
+
+  describe('with several clusters', () => {
+    const clusters = [{ id: 'eks-hub', local: true }, { id: 'eks-eu' }];
+
+    beforeEach(() => {
+      vi.mocked(useClusters).mockReturnValue(clusters);
+      vi.mocked(api.setCluster).mockClear();
+      window.history.replaceState(null, '', '/cost-intelligence');
+    });
+
+    it('shows every cluster by default and offers each one', () => {
+      render(<NamespaceDashboard />);
+
+      const select = screen.getByLabelText('Cluster') as HTMLSelectElement;
+      expect(Array.from(select.options).map(o => o.textContent)).toEqual(['All clusters', 'eks-hub (this cluster)', 'eks-eu']);
+      expect(select.value).toBe('');
+      expect(stat('All clusters monthly cost').value).toBe('$2,883.60');
+      expect(api.setCluster).toHaveBeenLastCalledWith('');
+    });
+
+    it('filters the namespaces to the cluster picked, kept in the URL', () => {
+      render(<NamespaceDashboard />);
+
+      fireEvent.change(screen.getByLabelText('Cluster'), { target: { value: 'eks-eu' } });
+
+      expect(api.setCluster).toHaveBeenLastCalledWith('eks-eu');
+      expect(new URLSearchParams(window.location.search).get('costCluster')).toBe('eks-eu');
+      expect(stat('eks-eu monthly cost')).toBeTruthy();
+    });
+
+    it('lists only the namespaces the cluster picked runs applications in', () => {
+      withNamespaceData({
+        namespaces: [
+          { namespace: 'argocd', totalCost: 2018.1, idleCost: 899.19, appCount: 2, measuredAt, clusters: ['eks-hub'] },
+          { namespace: 'prometheus', totalCost: 865.5, idleCost: 416.16, appCount: 1, measuredAt, clusters: ['eks-eu'] },
+        ],
+      });
+      render(<NamespaceDashboard />);
+      expect(stat('All clusters monthly cost').value).toBe('$2,883.60');
+
+      fireEvent.change(screen.getByLabelText('Cluster'), { target: { value: 'eks-eu' } });
+
+      expect(stat('eks-eu monthly cost').value).toBe('$865.50');
+      expect(screen.queryByRole('button', { name: /argocd/ })).toBeNull();
+    });
+
+    it('has the ranking filtered to the cluster picked, this one included', () => {
+      render(<NamespaceDashboard />);
+      expect(api.setClusterFilter).toHaveBeenLastCalledWith('');
+
+      fireEvent.change(screen.getByLabelText('Cluster'), { target: { value: 'eks-hub' } });
+
+      expect(api.setClusterFilter).toHaveBeenLastCalledWith('eks-hub');
+      expect(api.setCluster).toHaveBeenLastCalledWith('');
+    });
+
+    it('reads this cluster when it is picked', () => {
+      window.history.replaceState(null, '', '/cost-intelligence?costCluster=eks-hub');
+
+      render(<NamespaceDashboard />);
+
+      expect((screen.getByLabelText('Cluster') as HTMLSelectElement).value).toBe('eks-hub');
+      expect(stat('eks-hub monthly cost')).toBeTruthy();
+      expect(api.setCluster).toHaveBeenLastCalledWith('');
+    });
+
+    it('takes a cluster the service does not list as all of them', () => {
+      window.history.replaceState(null, '', '/cost-intelligence?costCluster=gone');
+
+      render(<NamespaceDashboard />);
+
+      expect((screen.getByLabelText('Cluster') as HTMLSelectElement).value).toBe('');
+    });
+  });
+
+  it('has no cluster picker when there is one cluster', () => {
+    render(<NamespaceDashboard />);
+
+    expect(screen.queryByLabelText('Cluster')).toBeNull();
   });
 });
