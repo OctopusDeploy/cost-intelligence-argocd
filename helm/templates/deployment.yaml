@@ -132,6 +132,10 @@ spec:
         - name: KUBECOST_SHARE_NAMESPACES
           value: {{ join "," . | quote }}
         {{- end }}
+        {{- if .Values.openCost.externalCosts }}
+        - name: KUBECOST_EXTERNAL_COSTS
+          value: "true"
+        {{- end }}
         {{- with .Values.openCost.apiKey.existingSecret }}
         - name: KUBECOST_API_KEY
           valueFrom:

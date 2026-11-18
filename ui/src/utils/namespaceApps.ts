@@ -28,6 +28,7 @@ export interface AppCost {
   storageCost: number;
   networkCost: number;
   sharedCost: number;
+  externalCost: number;
   totalCost: number;
   // share is the fraction (0–1) of the namespace's cost.
   share: number;
@@ -164,6 +165,7 @@ export function splitNamespaceByApp(
       storageCost: controllers.reduce((sum, group) => sum + group.storageCost, 0),
       networkCost: controllers.reduce((sum, group) => sum + group.networkCost, 0),
       sharedCost: controllers.reduce((sum, group) => sum + group.sharedCost, 0),
+      externalCost: controllers.reduce((sum, group) => sum + group.externalCost, 0),
       totalCost: controllers.reduce((sum, group) => sum + group.totalCost, 0),
       share: 0,
       measuredAt,

@@ -13,6 +13,7 @@ export interface ControllerGroup {
   networkCost: number;
   gpuCost: number;
   sharedCost: number;
+  externalCost: number;
   totalCost: number;
   // share is the group's fraction (0–1) of all listed groups, so shares add up to 100%.
   share: number;
@@ -46,6 +47,7 @@ export function groupPodsByController(pods: PodCost[]): ControllerGroup[] {
         networkCost: 0,
         gpuCost: 0,
         sharedCost: 0,
+        externalCost: 0,
         totalCost: 0,
         share: 0,
       };
@@ -58,6 +60,7 @@ export function groupPodsByController(pods: PodCost[]): ControllerGroup[] {
     group.networkCost += pod.networkCost ?? 0;
     group.gpuCost += pod.gpuCost ?? 0;
     group.sharedCost += pod.sharedCost ?? 0;
+    group.externalCost += pod.externalCost ?? 0;
     group.totalCost += pod.totalCost;
   }
 

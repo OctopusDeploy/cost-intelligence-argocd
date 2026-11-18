@@ -20,6 +20,7 @@ const app = (namespace: string, controller: string): AppCost => ({
       networkCost: 0,
       gpuCost: 0,
       sharedCost: 0,
+      externalCost: 0,
       totalCost: 2,
       share: 1,
     },
@@ -31,6 +32,7 @@ const app = (namespace: string, controller: string): AppCost => ({
   storageCost: 0,
   networkCost: 0,
   sharedCost: 0,
+  externalCost: 0,
   totalCost: 2,
   share: 0.5,
   measuredAt: null,
@@ -47,6 +49,14 @@ describe('NamespaceAppsTable', () => {
     expect(queryByRole('columnheader', { name: 'Storage' })).not.toBeNull();
     expect(queryByRole('columnheader', { name: 'Network' })).not.toBeNull();
     expect(queryByRole('columnheader', { name: 'GPU' })).toBeNull();
+  });
+
+  it('shows an External column only when an application has external cost', () => {
+    const { queryByRole, rerender } = render(<NamespaceAppsTable apps={[app('team-a', 'web')]} totalCost={2} />);
+    expect(queryByRole('columnheader', { name: 'External' })).toBeNull();
+
+    rerender(<NamespaceAppsTable apps={[{ ...app('team-a', 'web'), externalCost: 4, totalCost: 6 }]} totalCost={6} />);
+    expect(queryByRole('columnheader', { name: 'External' })).not.toBeNull();
   });
 
   it('expands one of two same-named applications from different namespaces', () => {
@@ -73,6 +83,7 @@ describe('NamespaceAppsTable', () => {
       networkCost: 0,
       gpuCost: 0,
       sharedCost: 0,
+      externalCost: 0,
       totalCost: 0.087,
       share: 0.5,
     });

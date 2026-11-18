@@ -242,6 +242,10 @@ openCost:
   # in proportion to their cost, for example [kube-system]. A shared namespace is not measured itself.
   # Empty shares none.
   shareNamespaces: []
+  # Kubecost only: count the external cost Kubecost attributes to each allocation (cloud services
+  # matched from the bill, such as a database) in what each costs, as an "External" column. Off by
+  # default: it can overlap the cloud service estimates read from Infracost.
+  externalCosts: false
   # Kubecost only: a protected aggregator wants an API key. The key is read from a Secret you create,
   # never from these values:
   #   kubectl -n <namespace> create secret generic kubecost-api-key --from-literal=api-key=...

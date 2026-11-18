@@ -205,7 +205,7 @@ export function hasRequests(efficiency: EfficiencyMetrics): boolean {
 }
 
 export interface CostSlice {
-  id: 'cpu' | 'memory' | 'storage' | 'network' | 'cloud' | 'loadBalancer' | 'gpu' | 'shared';
+  id: 'cpu' | 'memory' | 'storage' | 'network' | 'cloud' | 'loadBalancer' | 'gpu' | 'shared' | 'external';
   label: string;
   value: number;
   // slot is a fixed index into the categorical palette, so each cost keeps its colour.
@@ -252,6 +252,12 @@ export function costSlices(data: CostData): CostSlice[] {
       value: included,
       slot: 7,
       children: sharedParts.length > 0 ? sharedParts : undefined,
+    },
+    {
+      id: 'external',
+      label: 'External cost',
+      value: totals?.externalCostIncluded ? (totals.externalCost ?? 0) : 0,
+      slot: 8,
     },
   ];
   return slices.filter(slice => slice.value > 0);

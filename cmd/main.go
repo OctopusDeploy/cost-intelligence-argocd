@@ -387,6 +387,7 @@ func newOpenCostClient(cfg *config.Config, metrics *telemetry.Metrics, logger *l
 	if cfg.CostProvider == config.ProviderKubecost {
 		opts = append(opts, opencost.WithKubecost(cfg.KubecostClusterID))
 		opts = append(opts, opencost.WithSharedCosts(cfg.KubecostShareTenancyCosts, cfg.KubecostShareNamespaces))
+		opts = append(opts, opencost.WithExternalCosts(cfg.KubecostExternalCosts))
 		opts = append(opts, opencost.WithCloudCostURL(cfg.KubecostCloudCostURL))
 		if name, value := cfg.APIKeyHeader(); name != "" {
 			opts = append(opts, opencost.WithHeader(name, value))

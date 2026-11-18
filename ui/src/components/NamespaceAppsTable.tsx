@@ -33,6 +33,12 @@ const OPTIONAL_COLUMNS: OptionalColumn[] = [
     app: a => a.sharedCost,
     controller: c => c.sharedCost,
   },
+  {
+    label: 'External',
+    title: 'External cost: cloud services attributed to the app',
+    app: a => a.externalCost,
+    controller: c => c.externalCost,
+  },
 ];
 
 // appLink opens an application's Cost Intelligence view in Argo CD.

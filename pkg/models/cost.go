@@ -211,7 +211,10 @@ type PodCost struct {
 	// SharedCost is the part of TotalCost that is shared cost spread over the pod (set only when
 	// shared costs are included), not the pod's own usage.
 	SharedCost float64 `json:"sharedCost,omitempty"`
-	TotalCost  float64 `json:"totalCost"`
+	// ExternalCost is the part of TotalCost that is external cost (cloud services Kubecost attributes to
+	// the pod), set only when external costs are included.
+	ExternalCost float64 `json:"externalCost,omitempty"`
+	TotalCost    float64 `json:"totalCost"`
 	// Group is the value of the configured grouping labels (UNMANAGED_GROUP_LABELS), for listing the
 	// pods no Argo CD application manages by team or project. Presentation only: it never decides
 	// which application owns a pod.
@@ -286,9 +289,10 @@ type AllocationTotal struct {
 	CarbonCost             float64 `json:"carbonCost"`
 	SharedCost             float64 `json:"sharedCost,omitempty"`
 	// ExternalCost is what Kubecost attributes to the allocations from outside the cluster (cloud
-	// services matched from the bill). Only reported: TotalCost leaves it out, as the cloud services
-	// estimate already covers them.
-	ExternalCost float64 `json:"externalCost,omitempty"`
+	// services matched from the bill). Reported always; part of TotalCost only when ExternalCostIncluded
+	// (KUBECOST_EXTERNAL_COSTS), as the cloud services estimate may already cover them.
+	ExternalCost         float64 `json:"externalCost,omitempty"`
+	ExternalCostIncluded bool    `json:"externalCostIncluded,omitempty"`
 	// SharedCostIncluded says SharedCost is part of TotalCost (it was asked for: tenancy costs or shared
 	// namespaces). Otherwise SharedCost is only reported and TotalCost leaves it out.
 	SharedCostIncluded  bool               `json:"sharedCostIncluded,omitempty"`

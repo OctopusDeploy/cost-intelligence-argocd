@@ -30,6 +30,7 @@ describe('ControllerCostTable', () => {
             networkCost: 0,
             gpuCost: 0,
             sharedCost: 0,
+            externalCost: 0,
             totalCost: 0.174,
             share: 1,
           },
@@ -63,6 +64,7 @@ describe('ControllerCostTable', () => {
       networkCost: 0,
       gpuCost: 0,
       sharedCost,
+      externalCost: 0,
       totalCost: 15 + sharedCost,
       share: 1,
     });
@@ -75,6 +77,33 @@ describe('ControllerCostTable', () => {
     expect(screen.getByRole('columnheader', { name: 'Shared' })).toBeTruthy();
     const cells = within(screen.getAllByRole('row')[1]).getAllByRole('cell').map(cell => cell.textContent);
     expect(cells.filter(text => text?.startsWith('$'))).toEqual(['$10.00', '$5.00', '$7.50', '$22.50']);
+  });
+
+  it('adds an External column only when a controller has external cost', () => {
+    const group = (externalCost: number) => ({
+      key: 'Deployment/web',
+      kind: 'Deployment',
+      name: 'web',
+      pods: [{ ...pod('web-1'), externalCost }],
+      cpuCost: 10,
+      ramCost: 5,
+      storageCost: 0,
+      networkCost: 0,
+      gpuCost: 0,
+      sharedCost: 0,
+      externalCost,
+      totalCost: 15 + externalCost,
+      share: 1,
+    });
+
+    const { unmount } = render(<ControllerCostTable groups={[group(0)]} />);
+    expect(screen.queryByRole('columnheader', { name: 'External' })).toBeNull();
+    unmount();
+
+    render(<ControllerCostTable groups={[group(4)]} />);
+    expect(screen.getByRole('columnheader', { name: 'External' })).toBeTruthy();
+    const cells = within(screen.getAllByRole('row')[1]).getAllByRole('cell').map(cell => cell.textContent);
+    expect(cells.filter(text => text?.startsWith('$'))).toEqual(['$10.00', '$5.00', '$4.00', '$19.00']);
   });
 
   it('adds Storage and Network columns so the cells add up to the total', () => {
@@ -93,6 +122,7 @@ describe('ControllerCostTable', () => {
             networkCost: 1,
             gpuCost: 0,
             sharedCost: 0,
+            externalCost: 0,
             totalCost: 20,
             share: 1,
           },

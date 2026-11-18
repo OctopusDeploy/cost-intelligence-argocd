@@ -49,6 +49,9 @@ export interface PodCost {
   gpuCost?: number;
   // sharedCost is the part of totalCost that is shared cost spread over the pod, not its own usage.
   sharedCost?: number;
+  // externalCost is the part of totalCost that is external cost (cloud services Kubecost attributes to
+  // the pod), present only when the backend counts external costs.
+  externalCost?: number;
   totalCost: number;
   // group names the team or project the pod belongs to, from the labels the backend is configured
   // to group unmanaged pods by. Presentation only.
@@ -72,6 +75,10 @@ export interface CostBreakdown {
   // sharedCostIncluded says sharedCost is part of totalCost, rather than only reported beside it.
   sharedCostIncluded?: boolean;
   sharedCostBreakdown?: Record<string, number>;
+  // externalCost is what Kubecost attributes to the allocations from outside the cluster;
+  // externalCostIncluded says it is part of totalCost, rather than only reported beside it.
+  externalCost?: number;
+  externalCostIncluded?: boolean;
 }
 
 export interface CostAnomaly {

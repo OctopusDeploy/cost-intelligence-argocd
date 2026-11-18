@@ -358,6 +358,10 @@
           "items": { "type": "string" },
           "description": "Kubecost only: namespaces whose cost is spread over the applications and counted in each cost (KUBECOST_SHARE_NAMESPACES)."
         },
+        "externalCosts": {
+          "type": "boolean",
+          "description": "Kubecost only: count the external cost Kubecost attributes to each allocation in what it costs (KUBECOST_EXTERNAL_COSTS)."
+        },
         "apiKey": {
           "type": "object",
           "additionalProperties": false,

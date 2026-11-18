@@ -36,6 +36,9 @@ type Client struct {
 	// cost of the named namespaces over the other allocations; see WithSharedCosts.
 	shareTenancy    bool
 	shareNamespaces []string
+	// externalCosts counts the externalCost Kubecost reports (cloud services attributed to an
+	// allocation) in the costs; see WithExternalCosts.
+	externalCosts bool
 
 	// cloudCostURL is where Kubecost's /cloudCost/status is read; empty uses baseURL.
 	cloudCostURL string
@@ -87,6 +90,13 @@ func WithSharedCosts(tenancy bool, namespaces []string) ClientOption {
 			}
 		}
 	}
+}
+
+// WithExternalCosts counts the external cost Kubecost attributes to each allocation (cloud services
+// matched from the bill, such as a database) in the costs, as its own part beside CPU and memory.
+// Without it the external cost is only reported in the allocation totals. Kubecost only.
+func WithExternalCosts(enabled bool) ClientOption {
+	return func(c *Client) { c.externalCosts = enabled }
 }
 
 // WithPodGroupLabels names the pod labels (as Kubernetes spells them, for example
@@ -230,6 +240,8 @@ type AllocationData struct {
 	// countShared adds SharedCost to what the allocation costs. Set when the request asked for costs to
 	// be shared (see Client.countShared); otherwise SharedCost is only reported, as before.
 	countShared bool
+	// countExternal adds ExternalCost to what the allocation costs; see Client.countShared.
+	countExternal bool
 }
 
 // UnmarshalJSON reads an allocation with its cost adjustments folded into the costs they adjust.
@@ -281,7 +293,15 @@ type PVAllocation struct {
 // projected onto a month it drifts from the sum of the parts shown beside it, and it carries shared
 // and external costs that no view shows.
 func (a AllocationData) componentCost() float64 {
-	return a.baseCost() + a.countedShared()
+	return a.baseCost() + a.countedShared() + a.countedExternal()
+}
+
+// countedExternal is the external cost this allocation carries, when the client was asked to count it.
+func (a AllocationData) countedExternal() float64 {
+	if !a.countExternal {
+		return 0
+	}
+	return a.ExternalCost
 }
 
 // baseCost is componentCost without any shared cost.
@@ -307,15 +327,17 @@ func (c *Client) applySharing(params url.Values) {
 	}
 }
 
-// countShared marks the allocations of a response so the tenancy cost Kubecost shared counts in the
-// totals, when this client asked for it.
+// countShared marks the allocations of a response so the tenancy cost Kubecost shared and the external
+// cost it reports count in the totals, when this client asked for them.
 func (c *Client) countShared(resp *AllocationResponse) {
-	if !c.kubecost || !c.shareTenancy {
+	share, external := c.kubecost && c.shareTenancy, c.kubecost && c.externalCosts
+	if !share && !external {
 		return
 	}
 	for _, set := range resp.Data {
 		for key, alloc := range set {
-			alloc.countShared = true
+			alloc.countShared = alloc.countShared || share
+			alloc.countExternal = external
 			set[key] = alloc
 		}
 	}
@@ -1725,6 +1747,7 @@ func parsePodBreakdown(resp AllocationResponse) []models.PodCost {
 				existing.NetworkCost += alloc.NetworkCost + alloc.LoadBalancerCost
 				existing.GPUCost += alloc.GPUCost
 				existing.SharedCost += alloc.countedShared()
+				existing.ExternalCost += alloc.countedExternal()
 				existing.TotalCost += alloc.componentCost()
 			} else {
 				podMap[name] = &models.PodCost{
@@ -1738,6 +1761,7 @@ func parsePodBreakdown(resp AllocationResponse) []models.PodCost {
 					NetworkCost:    alloc.NetworkCost + alloc.LoadBalancerCost,
 					GPUCost:        alloc.GPUCost,
 					SharedCost:     alloc.countedShared(),
+					ExternalCost:   alloc.countedExternal(),
 					TotalCost:      alloc.componentCost(),
 				}
 			}
@@ -1760,6 +1784,7 @@ func parsePodBreakdown(resp AllocationResponse) []models.PodCost {
 			NetworkCost:    p.NetworkCost * monthlyMultiplier,
 			GPUCost:        p.GPUCost * monthlyMultiplier,
 			SharedCost:     p.SharedCost * monthlyMultiplier,
+			ExternalCost:   p.ExternalCost * monthlyMultiplier,
 			TotalCost:      p.TotalCost * monthlyMultiplier,
 		})
 	}
@@ -1820,7 +1845,7 @@ func parseOpenCostResponse(resp AllocationResponse, startTime, endTime time.Time
 	}
 
 	var totalCPU, totalMem, totalStorage, totalGPU, totalNetwork, totalLB, totalCarbon, totalShared float64
-	var totalNetXZ, totalNetXR, totalNetInternet, totalNetNat, totalSharedCounted, totalExternal float64
+	var totalNetXZ, totalNetXR, totalNetInternet, totalNetNat, totalSharedCounted, totalExternal, totalExternalCounted float64
 	var peakCPU, peakRAM float64
 	sharedBreakdown := make(map[string]float64)
 
@@ -1848,6 +1873,7 @@ func parseOpenCostResponse(resp AllocationResponse, startTime, endTime time.Time
 			totalCarbon += alloc.CarbonCost
 			totalShared += alloc.SharedCost
 			totalExternal += alloc.ExternalCost
+			totalExternalCounted += alloc.countedExternal()
 			totalSharedCounted += alloc.countedShared()
 			totalNetXZ += alloc.NetworkCrossZoneCost
 			totalNetXR += alloc.NetworkCrossRegionCost
@@ -1889,10 +1915,11 @@ func parseOpenCostResponse(resp AllocationResponse, startTime, endTime time.Time
 		NetworkInternetCost:    totalNetInternet * monthlyMultiplier,
 		NetworkNatGatewayCost:  totalNetNat * monthlyMultiplier,
 		LoadBalancerCost:       totalLB * monthlyMultiplier,
-		TotalCost:              (totalCPU + totalMem + totalStorage + totalGPU + totalNetwork + totalLB + totalSharedCounted) * monthlyMultiplier,
+		TotalCost:              (totalCPU + totalMem + totalStorage + totalGPU + totalNetwork + totalLB + totalSharedCounted + totalExternalCounted) * monthlyMultiplier,
 		CarbonCost:             totalCarbon * monthlyMultiplier,
 		SharedCost:             totalShared * monthlyMultiplier,
 		ExternalCost:           totalExternal * monthlyMultiplier,
+		ExternalCostIncluded:   totalExternalCounted > 0,
 		SharedCostIncluded:     totalSharedCounted > 0,
 		SharedCostBreakdown:    scaledSharedBreakdown,
 	}

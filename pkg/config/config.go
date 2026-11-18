@@ -49,6 +49,10 @@ type Config struct {
 	// KubecostShareNamespaces are namespaces (for example kube-system) whose cost Kubecost spreads over
 	// the other allocations, and counts in each cost. Such a namespace is not measured itself.
 	KubecostShareNamespaces []string `envconfig:"KUBECOST_SHARE_NAMESPACES"`
+	// KubecostExternalCosts counts the external cost Kubecost attributes to each allocation (cloud
+	// services matched from the bill) in the costs. Off by default: it can overlap the cloud service
+	// estimates.
+	KubecostExternalCosts bool `envconfig:"KUBECOST_EXTERNAL_COSTS"`
 	// WebhookSecret is the bearer token Argo CD Notifications must send to POST /on-sync.
 	WebhookSecret string `envconfig:"WEBHOOK_SECRET"`
 

@@ -6,7 +6,7 @@ import { NAME_COLUMN, SPACER_COLUMN } from '../utils/layout';
 import { ControllerGroup } from '../utils/podGroups';
 import { PodCost } from '../utils/api';
 
-// Expand, controller, kind, pods, CPU, memory, (GPU, storage, network, shared,) total, share, then a spacer.
+// Expand, controller, kind, pods, CPU, memory, (GPU, storage, network, shared, external,) total, share, then a spacer.
 // The controller name grows to 480px and the spacer takes any width beyond that (see NAME_COLUMN). An
 // optional column is there only when some controller has that cost, so the cells beside a total add up
 // to it.
@@ -30,6 +30,12 @@ const OPTIONAL_COLUMNS: OptionalColumn[] = [
     title: "Cost shared across the cluster, not this controller's own usage",
     group: g => g.sharedCost,
     pod: p => p.sharedCost ?? 0,
+  },
+  {
+    label: 'External',
+    title: 'External cost: cloud services attributed to this controller',
+    group: g => g.externalCost,
+    pod: p => p.externalCost ?? 0,
   },
 ];
 
