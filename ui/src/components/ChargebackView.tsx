@@ -24,9 +24,9 @@ const DEBOUNCE_MS = 400;
 // Label value, CPU, memory, storage, network, GPU when any value has GPU cost, total, share,
 // efficiency, then a spacer. The value grows to 480px and the spacer takes any width beyond that
 // (see NAME_COLUMN). The minimum width is the value's minimum plus the fixed columns.
-const columns = (gpu: boolean) =>
-  `${NAME_COLUMN} 96px 96px 96px 96px ${gpu ? '96px ' : ''}112px 124px 152px ${SPACER_COLUMN}`;
-const minTableWidth = (gpu: boolean) => (gpu ? '1028px' : '932px');
+const columns = (gpu: boolean, extra: number) =>
+  `${NAME_COLUMN} 96px 96px 96px 96px ${gpu ? '96px ' : ''}${'96px '.repeat(extra)}112px 124px 152px ${SPACER_COLUMN}`;
+const minTableWidth = (gpu: boolean, extra: number) => `${(gpu ? 1028 : 932) + 96 * extra}px`;
 
 const LABEL_INPUT_ID = 'cost-intel-chargeback-label';
 const LABEL_LIST_ID = 'cost-intel-chargeback-label-keys';
@@ -271,10 +271,15 @@ const ChargebackTable: React.FC<TableProps> = ({ entries, totalCost, labelKey, l
   // GPU gets a column only when a value has GPU cost, as on the cost breakdown, so the columns
   // beside each total still add up to it.
   const gpu = entries.some(entry => (entry.gpuCost ?? 0) > 0);
+  // Shared and External likewise: only when counted and some value carries them.
+  const extras = [
+    { label: 'Shared', title: 'Cost shared across the cluster, not the value\'s own usage', of: (e: ChargebackEntry) => e.sharedCost ?? 0 },
+    { label: 'External', title: 'External cost: cloud services attributed to the value', of: (e: ChargebackEntry) => e.externalCost ?? 0 },
+  ].filter(extra => entries.some(entry => extra.of(entry) > 0));
 
   const row: React.CSSProperties = {
     display: 'grid',
-    gridTemplateColumns: columns(gpu),
+    gridTemplateColumns: columns(gpu, extras.length),
     alignItems: 'center',
     color: t.text,
     fontSize: '13px',
@@ -293,7 +298,7 @@ const ChargebackTable: React.FC<TableProps> = ({ entries, totalCost, labelKey, l
       />
 
       <div style={{ overflowX: 'auto' }}>
-        <div role="table" aria-labelledby={TITLE_ID} style={{ minWidth: minTableWidth(gpu) }}>
+        <div role="table" aria-labelledby={TITLE_ID} style={{ minWidth: minTableWidth(gpu, extras.length) }}>
           <div role="rowgroup">
             <div
               role="row"
@@ -327,6 +332,11 @@ const ChargebackTable: React.FC<TableProps> = ({ entries, totalCost, labelKey, l
                   GPU
                 </span>
               )}
+              {extras.map(extra => (
+                <span key={extra.label} role="columnheader" style={numeric} title={extra.title}>
+                  {extra.label}
+                </span>
+              ))}
               <span role="columnheader" style={numeric}>
                 Total
               </span>
@@ -342,8 +352,15 @@ const ChargebackTable: React.FC<TableProps> = ({ entries, totalCost, labelKey, l
           <div role="rowgroup">
             {entries.map(entry => {
               // Rounded so the cells beside the total add up to it.
-              const [cpuCost, ramCost, storageCost, networkCost, gpuCost] = roundParts(
-                [entry.cpuCost, entry.ramCost, entry.storageCost, entry.networkCost + entry.lbCost, entry.gpuCost ?? 0],
+              const [cpuCost, ramCost, storageCost, networkCost, gpuCost, ...extraCosts] = roundParts(
+                [
+                  entry.cpuCost,
+                  entry.ramCost,
+                  entry.storageCost,
+                  entry.networkCost + entry.lbCost,
+                  entry.gpuCost ?? 0,
+                  ...extras.map(extra => extra.of(entry)),
+                ],
                 entry.totalCost,
               );
               return (
@@ -372,6 +389,11 @@ const ChargebackTable: React.FC<TableProps> = ({ entries, totalCost, labelKey, l
                       {formatMoney(gpuCost)}
                     </span>
                   )}
+                  {extras.map((extra, i) => (
+                    <span key={extra.label} role="cell" style={numeric}>
+                      {formatMoney(extraCosts[i])}
+                    </span>
+                  ))}
                   <span role="cell" style={{ ...numeric, color: t.textStrong, fontWeight: 500 }}>
                     {formatMoney(entry.totalCost)}
                   </span>

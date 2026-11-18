@@ -1278,7 +1278,9 @@ func (c *Client) GetChargeback(ctx context.Context, labelKey, namespace string) 
 	}
 
 	c.prepare(ctx, params, false)
+	c.applySharing(params)
 	allocURL := fmt.Sprintf("%s/allocation?%s", c.baseURL, params.Encode())
+	params.Del("shareTenancyCosts")
 	c.logf("DEBUG opencost chargeback alloc GET %s", allocURL)
 
 	allocReq, err := http.NewRequestWithContext(ctx, http.MethodGet, allocURL, http.NoBody)
@@ -1323,6 +1325,7 @@ func (c *Client) GetChargeback(ctx context.Context, labelKey, namespace string) 
 		_ = json.NewDecoder(summaryResp.Body).Decode(&summaryResult)
 	}
 
+	c.countShared(&allocResult)
 	return parseChargebackEntries(allocResult, summaryResult), nil
 }
 
@@ -1358,8 +1361,8 @@ func parseChargebackEntries(alloc AllocationResponse, summary SummaryAllocationR
 	// started an hour ago would show an hour of cost spread over a day. A value with less than
 	// MinMeasuredPeriod of data is left out until it has more, as a namespace is.
 	type costAgg struct {
-		cpu, ram, gpu, pv, network, lb, total float64
-		start, end                            time.Time
+		cpu, ram, gpu, pv, network, lb, shared, external, total float64
+		start, end                                              time.Time
 	}
 	costs := make(map[string]*costAgg)
 
@@ -1379,6 +1382,8 @@ func parseChargebackEntries(alloc AllocationResponse, summary SummaryAllocationR
 			c.pv += a.PVCost
 			c.network += a.NetworkCost
 			c.lb += a.LoadBalancerCost
+			c.shared += a.countedShared()
+			c.external += a.countedExternal()
 			c.total += a.componentCost()
 			if !a.Start.IsZero() && (c.start.IsZero() || a.Start.Before(c.start)) {
 				c.start = a.Start
@@ -1410,6 +1415,8 @@ func parseChargebackEntries(alloc AllocationResponse, summary SummaryAllocationR
 			StorageCost: cost.pv * monthlyMultiplier,
 			NetworkCost: cost.network * monthlyMultiplier,
 			LBCost:      cost.lb * monthlyMultiplier,
+			SharedCost:   cost.shared * monthlyMultiplier,
+			ExternalCost: cost.external * monthlyMultiplier,
 			TotalCost:   cost.total * monthlyMultiplier,
 			Efficiency:  efficiency,
 			NoRequests:  noRequests,

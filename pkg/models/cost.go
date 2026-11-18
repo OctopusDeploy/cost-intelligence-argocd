@@ -324,6 +324,10 @@ type ChargebackEntry struct {
 	StorageCost float64 `json:"storageCost"`
 	NetworkCost float64 `json:"networkCost"`
 	LBCost      float64 `json:"lbCost"`
+	// SharedCost and ExternalCost are the parts of TotalCost that are shared and external cost, set
+	// only when those are counted.
+	SharedCost   float64 `json:"sharedCost,omitempty"`
+	ExternalCost float64 `json:"externalCost,omitempty"`
 	TotalCost   float64 `json:"totalCost"`
 	// Efficiency is how much of their CPU and memory requests the label value's pods use, weighted
 	// by cost; 0 when not measured or when NoRequests.

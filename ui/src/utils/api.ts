@@ -300,6 +300,8 @@ export interface ChargebackEntry {
   storageCost: number;
   networkCost: number;
   lbCost: number;
+  sharedCost?: number;
+  externalCost?: number;
   totalCost: number;
   efficiency: number;
   // Set when the value's pods request no CPU or memory, so efficiency has nothing to measure against.
