@@ -30,6 +30,7 @@ import { efficiencyLevel, hasRequests, recommendCpuRequest } from '../utils/cost
 import { formatMoney, formatPercent, pluralize, sumRounded } from '../utils/format';
 import { PAIRED_ROW_MIN, SIDE_LIST_MIN } from '../utils/layout';
 import { ArgoApplication, splitNamespaceByApp } from '../utils/namespaceApps';
+import { findNamespace, namespaceKey } from '../utils/namespaceKey';
 
 type View = 'namespaces' | 'idle' | 'chargeback';
 
@@ -98,7 +99,7 @@ const ClusterDashboard: React.FC<ClusterDashboardProps> = ({ picker, all, cluste
         : loaded.namespaces,
     [loaded.namespaces, filter]
   );
-  const effectiveNs = shown.some(ns => ns.namespace === loaded.selectedNs) ? loaded.selectedNs : (shown[0]?.namespace ?? null);
+  const effectiveNs = loaded.selectedNs && findNamespace(shown, loaded.selectedNs) ? loaded.selectedNs : (shown[0] ? namespaceKey(shown[0]) : null);
   const { setSelectedNs: selectLoadedNs } = loaded;
   useEffect(() => {
     if (effectiveNs && effectiveNs !== loaded.selectedNs) selectLoadedNs(effectiveNs);
@@ -199,16 +200,16 @@ const NamespacesView: React.FC<NamespacesViewProps> = ({ all, clusterCount, clus
   // match — by replacing, so the correction is not a step to go Back through.
   useEffect(() => {
     if (!selectedNs) return;
-    if (urlNamespace !== '' && namespaces.some(ns => ns.namespace === urlNamespace)) {
+    if (urlNamespace !== '' && findNamespace(namespaces, urlNamespace)) {
       if (urlNamespace !== selectedNs) setSelectedNs(urlNamespace);
       return;
     }
     onSelectNamespace(selectedNs, 'replace');
   }, [selectedNs, urlNamespace, namespaces, onSelectNamespace, setSelectedNs]);
 
-  const select = (namespace: string) => {
-    setSelectedNs(namespace);
-    onSelectNamespace(namespace);
+  const select = (key: string) => {
+    setSelectedNs(key);
+    onSelectNamespace(key);
   };
 
   if (namespacesLoading && namespaces.length === 0) return <Notice>Loading namespaces…</Notice>;
@@ -224,7 +225,7 @@ const NamespacesView: React.FC<NamespacesViewProps> = ({ all, clusterCount, clus
 
   const clusterTotal = namespaces.reduce((sum, ns) => sum + ns.totalCost, 0);
   const appCount = namespaces.reduce((sum, ns) => sum + ns.appCount, 0);
-  const selected = namespaces.find(ns => ns.namespace === selectedNs) ?? null;
+  const selected = (selectedNs ? findNamespace(namespaces, selectedNs) : undefined) ?? null;
 
   return (
     <div ref={layoutRef}>

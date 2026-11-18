@@ -776,10 +776,13 @@ class CostIntelligenceAPI {
     }
   }
 
-  async getNamespaceApps(namespace: string): Promise<CostData[]> {
+  // getNamespaceApps reads the applications of a namespace of the cluster it names, else of the cluster
+  // picked on the page: with all clusters picked, one name on two clusters would otherwise be one namespace.
+  async getNamespaceApps(namespace: string, cluster?: string): Promise<CostData[]> {
     try {
+      const url = `${this.baseUrl}/api/cost-analysis/namespace/${encodeURIComponent(namespace)}/apps`;
       const response = await fetch(
-        this.scoped(`${this.baseUrl}/api/cost-analysis/namespace/${encodeURIComponent(namespace)}/apps`),
+        cluster ? `${url}?cluster=${encodeURIComponent(cluster)}` : this.scoped(url),
         { headers: await this.clusterHeaders() }
       );
       if (!response.ok) {
@@ -829,8 +832,8 @@ export async function fetchNamespaces(): Promise<NamespaceSummary[]> {
   return _api.listNamespaces();
 }
 
-export async function fetchNamespaceApps(namespace: string): Promise<CostData[]> {
-  return _api.getNamespaceApps(namespace);
+export async function fetchNamespaceApps(namespace: string, cluster?: string): Promise<CostData[]> {
+  return _api.getNamespaceApps(namespace, cluster);
 }
 
 export async function fetchOrphanedPods(namespace: string): Promise<OrphanedPodsResponse> {

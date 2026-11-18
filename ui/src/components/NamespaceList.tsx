@@ -2,11 +2,13 @@ import React from 'react';
 import { cardStyle, useTokens } from '../theme/tokens';
 import { NamespaceSummary } from '../utils/api';
 import { formatMoney, formatPercent, pluralize } from '../utils/format';
+import { findNamespace, namespaceKey } from '../utils/namespaceKey';
 
 interface Props {
   namespaces: NamespaceSummary[];
   selected: string | null;
-  onSelect: (namespace: string) => void;
+  // onSelect gets the namespace's key (see namespaceKey).
+  onSelect: (key: string) => void;
   clusterTotal: number;
   // showClusters names each namespace's clusters, when the list spans several.
   showClusters?: boolean;
@@ -24,14 +26,14 @@ export const NamespaceList: React.FC<Props> = ({ namespaces, selected, onSelect,
       </div>
       <ul style={{ display: 'flex', flexDirection: 'column', gap: '2px', margin: 0, padding: 0, listStyle: 'none' }}>
         {namespaces.map(ns => {
-          const isSelected = ns.namespace === selected;
+          const isSelected = selected !== null && findNamespace(namespaces, selected) === ns;
           const share = clusterTotal > 0 ? ns.totalCost / clusterTotal : 0;
           return (
-            <li key={`${ns.cluster ?? ''}/${ns.namespace}`}>
+            <li key={namespaceKey(ns)}>
               <button
                 type="button"
                 aria-current={isSelected ? 'true' : undefined}
-                onClick={() => onSelect(ns.namespace)}
+                onClick={() => onSelect(namespaceKey(ns))}
                 style={{
                   display: 'flex',
                   flexDirection: 'column',
