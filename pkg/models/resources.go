@@ -2,9 +2,12 @@ package models
 
 import (
 	"fmt"
+	"maps"
 	"regexp"
 	"slices"
 	"strings"
+	"sync"
+	"sync/atomic"
 )
 
 // ManagedResource is a resource Argo CD manages for an application, as its status lists it.
@@ -17,10 +20,11 @@ type ManagedResource struct {
 // ManagedResources are the resources of one application.
 type ManagedResources []ManagedResource
 
-// nonPodOwnerKinds are the kinds Argo CD lists that never own pods. Any other kind, including a custom
-// resource (CloudNativePG Cluster, Argo Workflow, SparkApplication, RayCluster, ...), may own pods
-// directly, so it is kept and matched against the controller kind the cost backend reports.
-var nonPodOwnerKinds = map[string]bool{
+// builtinNonPodOwnerKinds are the kinds Argo CD lists that never own pods. Any other kind, including a
+// custom resource (CloudNativePG Cluster, Argo Workflow, SparkApplication, RayCluster, ...), may own
+// pods directly, so it is kept and matched against the controller kind the cost backend reports.
+// Never modified: ConfigureOwnership works on a copy.
+var builtinNonPodOwnerKinds = map[string]bool{
 	"service":                  true,
 	"serviceaccount":           true,
 	"configmap":                true,
@@ -69,7 +73,7 @@ func (rs ManagedResources) PodOwners() ManagedResources {
 		kind := strings.ToLower(r.Kind)
 		// A custom resource with a name that is no Kubernetes name (some CRDs allow any) is left out
 		// rather than failing the notification; a workload with one is a bad notification (Valid).
-		if !nonPodOwnerKinds[kind] && (workloadKinds[kind] || resourceName.MatchString(r.Name)) {
+		if !rules().nonPodOwnerKinds[kind] && (workloadKinds[kind] || resourceName.MatchString(r.Name)) {
 			owners = append(owners, r)
 		}
 	}
@@ -138,10 +142,11 @@ func (rs ManagedResources) OwnsPod(namespace, controllerKind, controller, pod st
 	return ok
 }
 
-// kindOwnerLabels are the labels an operator puts on the pods it creates to name the custom resource
-// they belong to, by the kinds whose name the label carries. Keys are normalised (see labelKey), as
-// OpenCost and Kubecost report labels with dots, slashes and dashes turned into underscores.
-var kindOwnerLabels = map[string][]string{
+// builtinKindOwnerLabels are the labels an operator puts on the pods it creates to name the custom
+// resource they belong to, by the kinds whose name the label carries. Keys are normalised (see
+// labelKey), as OpenCost and Kubecost report labels with dots, slashes and dashes turned into
+// underscores. Never modified: ConfigureOwnership works on a copy.
+var builtinKindOwnerLabels = map[string][]string{
 	labelKey("clickhouse.altinity.com/chi"):               {"clickhouseinstallation"},
 	labelKey("cnpg.io/cluster"):                           {"cluster"},
 	labelKey("strimzi.io/cluster"):                        {"kafka", "kafkaconnect", "kafkamirrormaker2", "kafkabridge"},
@@ -149,10 +154,11 @@ var kindOwnerLabels = map[string][]string{
 	labelKey("kibana.k8s.elastic.co/name"):                {"kibana"},
 }
 
-// genericOwnerLabels name the owner on the pods of many operators (Pravega's ZookeeperCluster labels
-// its pods app and release, RabbitMQ's operator app.kubernetes.io/name, ...). They only match a custom
-// resource, never a workload kind, which the controller of the pod already identifies.
-var genericOwnerLabels = []string{
+// builtinGenericOwnerLabels name the owner on the pods of many operators (Pravega's ZookeeperCluster
+// labels its pods app and release, RabbitMQ's operator app.kubernetes.io/name, ...). They only match a
+// custom resource, never a workload kind, which the controller of the pod already identifies. Never
+// modified: ConfigureOwnership works on a copy.
+var builtinGenericOwnerLabels = []string{
 	labelKey("app.kubernetes.io/instance"),
 	labelKey("app.kubernetes.io/name"),
 	labelKey("app"),
@@ -212,46 +218,130 @@ func labelKey(k string) string {
 	}, strings.ToLower(k))
 }
 
-// ConfigureOwnership extends the built-in lists above. It must be called once at startup, before any
-// pod is matched.
+// ownershipRules are the rules that decide which application owns a pod: the built-in lists plus what
+// ConfigureOwnership and ConfigureUnownedPodLabels add. A value is immutable once published, so
+// readers need no lock and a configuration change never races with a measurement.
+type ownershipRules struct {
+	nonPodOwnerKinds   map[string]bool
+	kindOwnerLabels    map[string][]string
+	genericOwnerLabels []string
+	unownedPodLabels   []unownedPodLabel
+}
+
+var (
+	currentRules atomic.Pointer[ownershipRules]
+	// configureMu serialises the writers; readers use currentRules only.
+	configureMu sync.Mutex
+)
+
+// builtinRules returns a fresh copy of the built-in rules.
+func builtinRules() *ownershipRules {
+	kindLabels := make(map[string][]string, len(builtinKindOwnerLabels))
+	for k, v := range builtinKindOwnerLabels {
+		kindLabels[k] = slices.Clone(v)
+	}
+	return &ownershipRules{
+		nonPodOwnerKinds:   maps.Clone(builtinNonPodOwnerKinds),
+		kindOwnerLabels:    kindLabels,
+		genericOwnerLabels: slices.Clone(builtinGenericOwnerLabels),
+	}
+}
+
+// clone returns a deep copy a writer can modify before publishing it.
+func (r *ownershipRules) clone() *ownershipRules {
+	kindLabels := make(map[string][]string, len(r.kindOwnerLabels))
+	for k, v := range r.kindOwnerLabels {
+		kindLabels[k] = slices.Clone(v)
+	}
+	return &ownershipRules{
+		nonPodOwnerKinds:   maps.Clone(r.nonPodOwnerKinds),
+		kindOwnerLabels:    kindLabels,
+		genericOwnerLabels: slices.Clone(r.genericOwnerLabels),
+		unownedPodLabels:   slices.Clone(r.unownedPodLabels),
+	}
+}
+
+// rules returns the rules in force.
+func rules() *ownershipRules {
+	if r := currentRules.Load(); r != nil {
+		return r
+	}
+	configureMu.Lock()
+	defer configureMu.Unlock()
+	if r := currentRules.Load(); r != nil {
+		return r
+	}
+	r := builtinRules()
+	currentRules.Store(r)
+	return r
+}
+
+// ResetOwnership drops everything ConfigureOwnership and ConfigureUnownedPodLabels added, back to the
+// built-in rules. For tests.
+func ResetOwnership() {
+	configureMu.Lock()
+	defer configureMu.Unlock()
+	currentRules.Store(builtinRules())
+}
+
+// update applies a change to a copy of the rules and publishes it only if it succeeds.
+func update(change func(r *ownershipRules) error) error {
+	configureMu.Lock()
+	defer configureMu.Unlock()
+	base := currentRules.Load()
+	if base == nil {
+		base = builtinRules()
+	}
+	next := base.clone()
+	if err := change(next); err != nil {
+		return err
+	}
+	currentRules.Store(next)
+	return nil
+}
+
+// ConfigureOwnership extends the built-in lists above. It is safe to call at any time, and a call
+// that returns an error changes nothing.
 //
 // ownerLabels is a comma-separated list of labels naming the owner of a pod, each written
 // "<label>=<Kind>|<Kind>" for one that names a resource of those kinds, or just "<label>" for one that
 // names any custom resource, for example "foo.io/cluster=Foo|FooShard,example.com/owner". nonOwnerKinds
 // is a comma-separated list of kinds Argo CD lists that never own pods, dropped from the notification.
 func ConfigureOwnership(ownerLabels, nonOwnerKinds string) error {
-	for entry := range strings.SplitSeq(ownerLabels, ",") {
-		entry = strings.TrimSpace(entry)
-		if entry == "" {
-			continue
+	return update(func(r *ownershipRules) error {
+		for entry := range strings.SplitSeq(ownerLabels, ",") {
+			entry = strings.TrimSpace(entry)
+			if entry == "" {
+				continue
+			}
+			label, kinds, hasKinds := strings.Cut(entry, "=")
+			label = strings.TrimSpace(label)
+			if label == "" {
+				return fmt.Errorf("owner label %q has no label name", entry)
+			}
+			if !hasKinds {
+				r.genericOwnerLabels = append(r.genericOwnerLabels, labelKey(label))
+				continue
+			}
+			var list []string
+			for k := range strings.SplitSeq(kinds, "|") {
+				if k = strings.ToLower(strings.TrimSpace(k)); k != "" {
+					list = append(list, k)
+				}
+			}
+			if len(list) == 0 {
+				return fmt.Errorf("owner label %q lists no kind after '='", entry)
+			}
+			key := labelKey(label)
+			r.kindOwnerLabels[key] = append(r.kindOwnerLabels[key], list...)
 		}
-		label, kinds, hasKinds := strings.Cut(entry, "=")
-		label = strings.TrimSpace(label)
-		if label == "" {
-			return fmt.Errorf("owner label %q has no label name", entry)
-		}
-		if !hasKinds {
-			genericOwnerLabels = append(genericOwnerLabels, labelKey(label))
-			continue
-		}
-		var list []string
-		for k := range strings.SplitSeq(kinds, "|") {
+		for k := range strings.SplitSeq(nonOwnerKinds, ",") {
 			if k = strings.ToLower(strings.TrimSpace(k)); k != "" {
-				list = append(list, k)
+				r.nonPodOwnerKinds[k] = true
 			}
 		}
-		if len(list) == 0 {
-			return fmt.Errorf("owner label %q lists no kind after '='", entry)
-		}
-		key := labelKey(label)
-		kindOwnerLabels[key] = append(kindOwnerLabels[key], list...)
-	}
-	for k := range strings.SplitSeq(nonOwnerKinds, ",") {
-		if k = strings.ToLower(strings.TrimSpace(k)); k != "" {
-			nonPodOwnerKinds[k] = true
-		}
-	}
-	return nil
+		return nil
+	})
 }
 
 // unownedPodLabel is a label that attributes the pods that have no controller to the application of
@@ -259,25 +349,26 @@ func ConfigureOwnership(ownerLabels, nonOwnerKinds string) error {
 // runners). An empty value matches any value.
 type unownedPodLabel struct{ key, value string }
 
-var unownedPodLabels []unownedPodLabel
-
-// ConfigureUnownedPodLabels sets the labels that attribute controller-less pods to the only application
+// ConfigureUnownedPodLabels adds the labels that attribute controller-less pods to the only application
 // deployed in their namespace: a comma-separated list of "<label>=<value>" or "<label>" (any value),
-// for example "managedby=Airflow". It must be called once at startup.
+// for example "managedby=Airflow". It is safe to call at any time, and a call that returns an error
+// changes nothing.
 func ConfigureUnownedPodLabels(spec string) error {
-	for entry := range strings.SplitSeq(spec, ",") {
-		entry = strings.TrimSpace(entry)
-		if entry == "" {
-			continue
+	return update(func(r *ownershipRules) error {
+		for entry := range strings.SplitSeq(spec, ",") {
+			entry = strings.TrimSpace(entry)
+			if entry == "" {
+				continue
+			}
+			key, value, _ := strings.Cut(entry, "=")
+			key = strings.TrimSpace(key)
+			if key == "" {
+				return fmt.Errorf("unowned pod label %q has no label name", entry)
+			}
+			r.unownedPodLabels = append(r.unownedPodLabels, unownedPodLabel{labelKey(key), strings.TrimSpace(value)})
 		}
-		key, value, _ := strings.Cut(entry, "=")
-		key = strings.TrimSpace(key)
-		if key == "" {
-			return fmt.Errorf("unowned pod label %q has no label name", entry)
-		}
-		unownedPodLabels = append(unownedPodLabels, unownedPodLabel{labelKey(key), strings.TrimSpace(value)})
-	}
-	return nil
+		return nil
+	})
 }
 
 // OwnsPodLabeled is OwnsPod for a pod whose labels the cost backend reports.
@@ -302,12 +393,13 @@ func (rs ManagedResources) OwnerOfLabeled(namespace, controllerKind, controller,
 	for k, v := range labels {
 		normalised[labelKey(k)] = v
 	}
+	rl := rules()
 	for _, r := range rs {
 		if r.Namespace != "" && r.Namespace != namespace {
 			continue
 		}
 		rk := strings.ToLower(r.Kind)
-		for key, kinds := range kindOwnerLabels {
+		for key, kinds := range rl.kindOwnerLabels {
 			if normalised[key] != r.Name {
 				continue
 			}
@@ -318,7 +410,7 @@ func (rs ManagedResources) OwnerOfLabeled(namespace, controllerKind, controller,
 		if workloadKinds[rk] {
 			continue
 		}
-		for _, key := range genericOwnerLabels {
+		for _, key := range rl.genericOwnerLabels {
 			if v := normalised[key]; v != "" && (v == r.Name || v == namespace+"."+r.Name) {
 				return r, true
 			}
@@ -339,7 +431,7 @@ func (rs ManagedResources) OwnsUnownedPod(namespace, controllerKind, controller 
 	for k, v := range labels {
 		normalised[labelKey(k)] = v
 	}
-	for _, u := range unownedPodLabels {
+	for _, u := range rules().unownedPodLabels {
 		if v, ok := normalised[u.key]; ok && (u.value == "" || u.value == v) {
 			for _, r := range rs {
 				if r.Namespace == "" || r.Namespace == namespace {

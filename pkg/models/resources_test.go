@@ -111,7 +111,7 @@ func TestManagedResources_OpenTelemetryOperator(t *testing.T) {
 func TestUnownedPodLabels(t *testing.T) {
 	require.Error(t, ConfigureUnownedPodLabels("=Airflow"))
 	require.NoError(t, ConfigureUnownedPodLabels("managedby=Airflow"))
-	t.Cleanup(func() { unownedPodLabels = nil })
+	t.Cleanup(ResetOwnership)
 
 	resources := ManagedResources{{Kind: "Deployment", Name: "airflow-scheduler", Namespace: "airflow"}}
 	bare := map[string]string{"managedby": "Airflow"}
@@ -126,7 +126,8 @@ func TestUnownedPodLabels(t *testing.T) {
 }
 
 func TestConfigureOwnership(t *testing.T) {
-	// Not parallel: it extends package-level lists.
+	// Not parallel: it changes the shared rules, which the cleanup restores.
+	t.Cleanup(ResetOwnership)
 	require.Error(t, ConfigureOwnership("=Foo", ""))
 	require.Error(t, ConfigureOwnership("foo.io/cluster=", ""))
 	require.NoError(t, ConfigureOwnership("foo.io/cluster=Foo|FooShard, example.com/owner", "Widget"))
@@ -136,6 +137,25 @@ func TestConfigureOwnership(t *testing.T) {
 	assert.False(t, resources.OwnsPodLabeled("ns", "statefulset", "gen", "gen-0", map[string]string{"foo.io/cluster": "b1"}), "wrong kind")
 	assert.True(t, resources.OwnsPodLabeled("ns", "statefulset", "gen", "gen-0", map[string]string{"example.com/owner": "b1"}))
 	assert.Equal(t, ManagedResources{}, ManagedResources{{Kind: "Widget", Name: "w"}}.PodOwners())
+}
+
+func TestConfigureOwnership_FailureChangesNothingAndBuiltinsStayIntact(t *testing.T) {
+	// Not parallel: it changes the shared rules, which the cleanup restores.
+	t.Cleanup(ResetOwnership)
+
+	// The first entry is valid, the second is not: neither may apply.
+	require.Error(t, ConfigureOwnership("foo.io/cluster=Foo,=Bad", "Widget"))
+	resources := ManagedResources{{Kind: "Foo", Name: "f1", Namespace: "ns"}}
+	assert.False(t, resources.OwnsPodLabeled("ns", "statefulset", "gen", "gen-0", map[string]string{"foo.io/cluster": "f1"}))
+	assert.Len(t, ManagedResources{{Kind: "Widget", Name: "w"}}.PodOwners(), 1)
+
+	require.NoError(t, ConfigureOwnership("foo.io/cluster=Foo", "Widget"))
+	assert.True(t, resources.OwnsPodLabeled("ns", "statefulset", "gen", "gen-0", map[string]string{"foo.io/cluster": "f1"}))
+
+	ResetOwnership()
+	assert.False(t, resources.OwnsPodLabeled("ns", "statefulset", "gen", "gen-0", map[string]string{"foo.io/cluster": "f1"}))
+	assert.NotContains(t, builtinKindOwnerLabels, labelKey("foo.io/cluster"))
+	assert.NotContains(t, builtinNonPodOwnerKinds, "widget")
 }
 
 func TestManagedResources_PodOwners(t *testing.T) {

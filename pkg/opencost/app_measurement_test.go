@@ -330,7 +330,8 @@ func TestPodAllocations_namespaceFallbackAndVirtualEntries(t *testing.T) {
 }
 
 func TestForApplication_UnownedPodsGoToTheSoleApplicationOnly(t *testing.T) {
-	// Not parallel: the unowned pod labels are package-level.
+	// Not parallel: the unowned pod labels are shared; the cleanup restores them.
+	t.Cleanup(models.ResetOwnership)
 	require.NoError(t, models.ConfigureUnownedPodLabels("runner.example.com/job"))
 
 	pods := &PodAllocations{namespace: "ci", resp: AllocationResponse{Data: []map[string]AllocationData{{
