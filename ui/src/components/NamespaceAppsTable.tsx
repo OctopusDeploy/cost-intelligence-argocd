@@ -7,6 +7,7 @@ import { formatMoney, formatRelativeTime, isStale, pluralize, roundColumns, roun
 import { NAME_COLUMN, SPACER_COLUMN } from '../utils/layout';
 import { AppCost } from '../utils/namespaceApps';
 import { ControllerGroup } from '../utils/podGroups';
+import { PodCost } from '../utils/api';
 
 // Expand, application, CPU, memory, (GPU, storage, network, shared,) total, share, measured, then a
 // spacer. The application name grows to 480px and the spacer takes any width beyond that (see
@@ -21,23 +22,26 @@ interface OptionalColumn {
   title: string;
   app: (app: AppCost) => number;
   controller: (controller: ControllerGroup) => number;
+  pod: (pod: PodCost) => number;
 }
 
 const OPTIONAL_COLUMNS: OptionalColumn[] = [
-  { label: 'GPU', title: 'GPU cost', app: a => a.gpuCost, controller: c => c.gpuCost },
-  { label: 'Storage', title: 'Persistent volume cost', app: a => a.storageCost, controller: c => c.storageCost },
-  { label: 'Network', title: 'Network and load balancer cost', app: a => a.networkCost, controller: c => c.networkCost },
+  { label: 'GPU', title: 'GPU cost', app: a => a.gpuCost, controller: c => c.gpuCost, pod: p => p.gpuCost ?? 0 },
+  { label: 'Storage', title: 'Persistent volume cost', app: a => a.storageCost, controller: c => c.storageCost, pod: p => p.storageCost ?? 0 },
+  { label: 'Network', title: 'Network and load balancer cost', app: a => a.networkCost, controller: c => c.networkCost, pod: p => p.networkCost ?? 0 },
   {
     label: 'Shared',
     title: "Cost shared across the cluster, not the app's own usage",
     app: a => a.sharedCost,
     controller: c => c.sharedCost,
+    pod: p => p.sharedCost ?? 0,
   },
   {
     label: 'External',
     title: 'External cost: cloud services attributed to the app',
     app: a => a.externalCost,
     controller: c => c.externalCost,
+    pod: p => p.externalCost ?? 0,
   },
 ];
 
@@ -222,18 +226,53 @@ export const NamespaceAppsTable: React.FC<Props> = ({ apps, totalCost, unattribu
                 {open &&
                   app.controllers.map((controller, controllerIndex) => {
                     const controllerTotal = controllerTotals[controllerIndex];
+                    const controllerKey = `${key}/${controller.key}`;
+                    const podTotals = roundParts(controller.pods.map(pod => pod.totalCost), controllerTotal);
+                    const podRows = controller.pods.map((pod, podIndex) => ({
+                      pod,
+                      total: podTotals[podIndex],
+                      values: roundColumns(
+                        [pod.cpuCost, pod.ramCost, ...shown.map(column => column.pod(pod))],
+                        pod.totalCost,
+                        podTotals[podIndex]
+                      ),
+                    }));
                     const [controllerCpu, controllerRam, ...controllerOptional] = roundColumns(
                       [controller.cpuCost, controller.ramCost, ...shown.map(column => column.controller(controller))],
                       controller.totalCost,
                       controllerTotal
                     );
                     return (
+                      <React.Fragment key={controller.key}>
                       <div
-                        key={controller.key}
                         role="row"
                         style={{ ...row, minHeight: '44px', backgroundColor: t.surfaceSunken, borderTop: `1px solid ${t.border}` }}
                       >
-                        <span role="cell" />
+                        <span role="cell" style={{ paddingLeft: '20px' }}>
+                          {controller.pods.length > 0 && (
+                            <button
+                              type="button"
+                              aria-expanded={expanded.has(controllerKey)}
+                              aria-label={`Pods of ${controller.name}`}
+                              onClick={() => toggle(controllerKey)}
+                              style={{
+                                display: 'flex',
+                                alignItems: 'center',
+                                justifyContent: 'center',
+                                width: '24px',
+                                height: '24px',
+                                padding: 0,
+                                border: 'none',
+                                borderRadius: '4px',
+                                backgroundColor: 'transparent',
+                                color: t.text,
+                                cursor: 'pointer',
+                              }}
+                            >
+                              <ChevronIcon expanded={expanded.has(controllerKey)} />
+                            </button>
+                          )}
+                        </span>
                         <span role="rowheader" style={{ ...cell, ...truncated, paddingLeft: '31px' }}>
                           {controller.name}{' '}
                           <span style={{ color: t.textMuted, fontSize: '12px' }}>
@@ -259,6 +298,38 @@ export const NamespaceAppsTable: React.FC<Props> = ({ apps, totalCost, unattribu
                         </span>
                         <span role="cell" />
                       </div>
+                      {expanded.has(controllerKey) &&
+                        podRows.map(({ pod, values, total }) => (
+                          <div
+                            key={pod.name}
+                            role="row"
+                            style={{ ...row, minHeight: '36px', borderTop: `1px solid ${t.border}`, color: t.textMuted }}
+                          >
+                            <span role="cell" />
+                            <span role="rowheader" title={pod.name} style={{ ...cell, ...truncated, paddingLeft: '51px' }}>
+                              {pod.name}
+                            </span>
+                            <span role="cell" style={numeric}>
+                              {formatMoney(values[0])}
+                            </span>
+                            <span role="cell" style={numeric}>
+                              {formatMoney(values[1])}
+                            </span>
+                            {shown.map((column, i) => (
+                              <span key={column.label} role="cell" style={numeric}>
+                                {formatMoney(values[i + 2])}
+                              </span>
+                            ))}
+                            <span role="cell" style={numeric}>
+                              {formatMoney(total)}
+                            </span>
+                            <span role="cell" style={cell}>
+                              <Share fraction={totalCost > 0 ? pod.totalCost / totalCost : 0} t={t} />
+                            </span>
+                            <span role="cell" />
+                          </div>
+                        ))}
+                      </React.Fragment>
                     );
                   })}
               </div>

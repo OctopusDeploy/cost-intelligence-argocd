@@ -59,6 +59,23 @@ describe('NamespaceAppsTable', () => {
     expect(queryByRole('columnheader', { name: 'External' })).not.toBeNull();
   });
 
+  it('expands a controller to its pods, with the cost columns of a group the app lists', () => {
+    const base = app('team-a', 'web');
+    const pod = { name: 'job-1', namespace: 'team-a', controller: '', controllerKind: '', cpuCost: 1, ramCost: 1, networkCost: 4, totalCost: 6, group: 'dag' };
+    const grouped = {
+      ...base,
+      networkCost: 4,
+      totalCost: 6,
+      controllers: [{ ...base.controllers[0], kind: 'Group', name: 'dag', pods: [pod], networkCost: 4, totalCost: 6 }],
+    };
+    const { getByRole, queryByText } = render(<NamespaceAppsTable apps={[grouped]} totalCost={6} />);
+    fireEvent.click(getByRole('button', { name: 'Controllers of web' }));
+    expect(queryByText('job-1')).toBeNull();
+    fireEvent.click(getByRole('button', { name: 'Pods of dag' }));
+    expect(queryByText('job-1')).not.toBeNull();
+    expect(getByRole('columnheader', { name: 'Network' })).toBeTruthy();
+  });
+
   it('expands one of two same-named applications from different namespaces', () => {
     const { getAllByRole } = render(
       <NamespaceAppsTable apps={[app('team-a', 'web-a'), app('team-b', 'web-b')]} totalCost={4} />
