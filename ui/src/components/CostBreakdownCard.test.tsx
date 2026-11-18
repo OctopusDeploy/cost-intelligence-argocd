@@ -84,6 +84,39 @@ describe('CostBreakdownCard', () => {
     expect(screen.getByText(/Attributed proportionally from cluster-wide services/)).toBeTruthy();
   });
 
+  it('shows shared cost included in the total as its own labelled row', () => {
+    render(
+      <CostBreakdownCard
+        data={withTotals({
+          cpuCost: 60,
+          memoryCost: 30,
+          networkCost: 0,
+          sharedCost: 10,
+          sharedCostIncluded: true,
+          sharedCostBreakdown: { 'Namespace kube-system': 7.5, 'Tenancy Costs': 2.5 },
+          totalCost: 100,
+        })}
+      />
+    );
+
+    expect(rows()).toEqual([
+      'CPU$60.0060%',
+      'Memory$30.0030%',
+      'Shared cost$10.0010%',
+      'Namespace kube-system$7.507.5%',
+      'Tenancy Costs$2.502.5%',
+      'Total$100.00100%',
+    ]);
+    expect(screen.getByText(/Shared cost is included in the total/)).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /Shared costs/ })).toBeNull();
+  });
+
+  it('says shared costs reported beside the total are not in it', () => {
+    render(<CostBreakdownCard data={withTotals({ sharedCost: 12.5, sharedCostBreakdown: { dns: 12.5 } })} />);
+
+    expect(screen.getByRole('button', { name: /not in the total/ })).toBeTruthy();
+  });
+
   it('leaves out shared costs when there are none', () => {
     render(<CostBreakdownCard data={withTotals({})} />);
 

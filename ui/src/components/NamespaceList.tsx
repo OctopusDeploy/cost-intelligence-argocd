@@ -2,16 +2,20 @@ import React from 'react';
 import { cardStyle, useTokens } from '../theme/tokens';
 import { NamespaceSummary } from '../utils/api';
 import { formatMoney, formatPercent, pluralize } from '../utils/format';
+import { findNamespace, namespaceKey } from '../utils/namespaceKey';
 
 interface Props {
   namespaces: NamespaceSummary[];
   selected: string | null;
-  onSelect: (namespace: string) => void;
+  // onSelect gets the namespace's key (see namespaceKey).
+  onSelect: (key: string) => void;
   clusterTotal: number;
+  // showClusters names each namespace's clusters, when the list spans several.
+  showClusters?: boolean;
 }
 
 // NamespaceList lets the viewer pick a namespace, showing each one's cost and share of the cluster.
-export const NamespaceList: React.FC<Props> = ({ namespaces, selected, onSelect, clusterTotal }) => {
+export const NamespaceList: React.FC<Props> = ({ namespaces, selected, onSelect, clusterTotal, showClusters }) => {
   const t = useTokens();
 
   return (
@@ -22,14 +26,14 @@ export const NamespaceList: React.FC<Props> = ({ namespaces, selected, onSelect,
       </div>
       <ul style={{ display: 'flex', flexDirection: 'column', gap: '2px', margin: 0, padding: 0, listStyle: 'none' }}>
         {namespaces.map(ns => {
-          const isSelected = ns.namespace === selected;
+          const isSelected = selected !== null && findNamespace(namespaces, selected) === ns;
           const share = clusterTotal > 0 ? ns.totalCost / clusterTotal : 0;
           return (
-            <li key={ns.namespace}>
+            <li key={namespaceKey(ns)}>
               <button
                 type="button"
                 aria-current={isSelected ? 'true' : undefined}
-                onClick={() => onSelect(ns.namespace)}
+                onClick={() => onSelect(namespaceKey(ns))}
                 style={{
                   display: 'flex',
                   flexDirection: 'column',
@@ -67,8 +71,8 @@ export const NamespaceList: React.FC<Props> = ({ namespaces, selected, onSelect,
                   >
                     <span style={{ display: 'block', width: `${Math.min(share, 1) * 100}%`, height: '100%', backgroundColor: t.accent }} />
                   </span>
-                  <span style={{ minWidth: '84px', color: t.textMuted, fontSize: '12px', textAlign: 'right' }}>
-                    {formatPercent(share)} · {pluralize(ns.appCount, 'app')}
+                  <span style={{ minWidth: '84px', overflowWrap: 'anywhere', color: t.textMuted, fontSize: '12px', textAlign: 'right' }}>
+                    {formatPercent(share)} · {pluralize(ns.appCount, 'app')}{showClusters && ns.clusters?.length ? ` · ${ns.clusters.join(', ')}` : ''}
                   </span>
                 </span>
               </button>

@@ -6,17 +6,20 @@ export interface UseDailyRangeResult {
   loading: boolean;
   error: string | null;
   dailyCosts: DailyCost[] | null;
+  // True when the service wants this range drawn by week at most, never by month.
+  weeklyOnly: boolean;
   refetch: () => Promise<void>;
 }
 
 interface State {
   key: string;
   dailyCosts: DailyCost[] | null;
+  weeklyOnly: boolean;
   error: string | null;
   loading: boolean;
 }
 
-const IDLE: State = { key: '', dailyCosts: null, error: null, loading: false };
+const IDLE: State = { key: '', dailyCosts: null, weeklyOnly: false, error: null, loading: false };
 
 // useDailyRange fetches the daily series for a range of days, or nothing while range is null. A new
 // range shows a spinner; a refresh of the same one keeps its data on screen. Ranges up to about three
@@ -46,7 +49,7 @@ export const useDailyRange = (
       try {
         const data = await api.getDailyCosts(appName, { from, to }, appCtx);
         if (request !== latest.current) return;
-        setState({ key, dailyCosts: data?.dailyCosts ?? [], error: null, loading: false });
+        setState({ key, dailyCosts: data?.dailyCosts ?? [], weeklyOnly: data?.maxGranularity === 'week', error: null, loading: false });
       } catch (err) {
         if (request !== latest.current) return;
         const message = err instanceof Error ? err.message : 'Failed to fetch daily costs';
@@ -72,6 +75,7 @@ export const useDailyRange = (
     loading: current.loading,
     error: current.error,
     dailyCosts: current.dailyCosts,
+    weeklyOnly: current.weeklyOnly,
     refetch: () => load(false),
   };
 };
