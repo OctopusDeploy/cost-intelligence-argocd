@@ -1820,7 +1820,7 @@ func parseOpenCostResponse(resp AllocationResponse, startTime, endTime time.Time
 	}
 
 	var totalCPU, totalMem, totalStorage, totalGPU, totalNetwork, totalLB, totalCarbon, totalShared float64
-	var totalNetXZ, totalNetXR, totalNetInternet, totalNetNat, totalSharedCounted float64
+	var totalNetXZ, totalNetXR, totalNetInternet, totalNetNat, totalSharedCounted, totalExternal float64
 	var peakCPU, peakRAM float64
 	sharedBreakdown := make(map[string]float64)
 
@@ -1847,6 +1847,7 @@ func parseOpenCostResponse(resp AllocationResponse, startTime, endTime time.Time
 			totalLB += alloc.LoadBalancerCost
 			totalCarbon += alloc.CarbonCost
 			totalShared += alloc.SharedCost
+			totalExternal += alloc.ExternalCost
 			totalSharedCounted += alloc.countedShared()
 			totalNetXZ += alloc.NetworkCrossZoneCost
 			totalNetXR += alloc.NetworkCrossRegionCost
@@ -1891,6 +1892,7 @@ func parseOpenCostResponse(resp AllocationResponse, startTime, endTime time.Time
 		TotalCost:              (totalCPU + totalMem + totalStorage + totalGPU + totalNetwork + totalLB + totalSharedCounted) * monthlyMultiplier,
 		CarbonCost:             totalCarbon * monthlyMultiplier,
 		SharedCost:             totalShared * monthlyMultiplier,
+		ExternalCost:           totalExternal * monthlyMultiplier,
 		SharedCostIncluded:     totalSharedCounted > 0,
 		SharedCostBreakdown:    scaledSharedBreakdown,
 	}

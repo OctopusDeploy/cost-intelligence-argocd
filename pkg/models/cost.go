@@ -285,6 +285,10 @@ type AllocationTotal struct {
 	TotalCost              float64 `json:"totalCost"`
 	CarbonCost             float64 `json:"carbonCost"`
 	SharedCost             float64 `json:"sharedCost,omitempty"`
+	// ExternalCost is what Kubecost attributes to the allocations from outside the cluster (cloud
+	// services matched from the bill). Only reported: TotalCost leaves it out, as the cloud services
+	// estimate already covers them.
+	ExternalCost float64 `json:"externalCost,omitempty"`
 	// SharedCostIncluded says SharedCost is part of TotalCost (it was asked for: tenancy costs or shared
 	// namespaces). Otherwise SharedCost is only reported and TotalCost leaves it out.
 	SharedCostIncluded  bool               `json:"sharedCostIncluded,omitempty"`
