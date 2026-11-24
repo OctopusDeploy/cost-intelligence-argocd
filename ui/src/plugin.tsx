@@ -3,6 +3,7 @@ import { CostPanel } from './components/CostPanel';
 import { RemoteClusterPanel } from './components/RemoteClusterPanel';
 import { AppContext } from './utils/api';
 import { Destination, otherCluster } from './utils/destination';
+import { ManagedResource, podOwners } from './utils/ownership';
 
 // Argo CD Plugin Interface
 export const plugin = {
@@ -13,8 +14,6 @@ export const plugin = {
 
 // This component renders in the Application details view
 // It receives props from Argo CD's plugin system
-// Kinds that directly own pods — used to filter status.resources to controllers.
-const POD_OWNER_KINDS = new Set(['Deployment', 'StatefulSet', 'DaemonSet', 'Job', 'CronJob', 'ReplicaSet']);
 
 export interface ApplicationDetailsTabProps {
   application: {
@@ -27,7 +26,7 @@ export interface ApplicationDetailsTabProps {
       destination?: Destination;
     };
     status?: {
-      resources?: Array<{ kind: string; name: string; namespace?: string }>;
+      resources?: ManagedResource[];
     };
   };
 }
@@ -50,14 +49,12 @@ export const CostIntelligenceTab: React.FC<ApplicationDetailsTabProps> = ({
     [appName, appNs, appProject]
   );
 
-  // Derive the set of controller names this ArgoCD app manages so the Resources
-  // tab can filter OpenCost pod data down to just this app's resources.
-  const managedControllers = useMemo<Set<string>>(() => {
-    const resources = application?.status?.resources ?? [];
-    return new Set(
-      resources.filter(r => POD_OWNER_KINDS.has(r.kind)).map(r => r.name)
-    );
-  }, [application?.status?.resources]);
+  // The resources Argo CD lists for the app that can own pods, so the tab can narrow an older record
+  // of the whole namespace to the app's own pods.
+  const managedResources = useMemo<ManagedResource[]>(
+    () => podOwners(application?.status?.resources ?? []),
+    [application?.status?.resources]
+  );
 
   if (!appName) {
     return <div>Unable to determine application name</div>;
@@ -70,7 +67,7 @@ export const CostIntelligenceTab: React.FC<ApplicationDetailsTabProps> = ({
     return <RemoteClusterPanel cluster={cluster} />;
   }
 
-  return <CostPanel appName={appName} appCtx={appCtx} managedControllers={managedControllers} />;
+  return <CostPanel appName={appName} appCtx={appCtx} managedResources={managedResources} />;
 };
 
 // Export default for Argo CD to detect
