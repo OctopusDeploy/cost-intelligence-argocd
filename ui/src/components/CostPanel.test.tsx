@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { CostPanel } from './CostPanel';
 import { useCostData } from '../hooks/useCostData';
 import { CostData } from '../utils/api';
+import { ManagedResource } from '../utils/ownership';
 
 vi.mock('../hooks/useCostData', () => ({ useCostData: vi.fn() }));
 vi.mock('./CostActual', async () => {
@@ -136,14 +137,17 @@ describe('CostPanel', () => {
       ramCost: 0,
       totalCost: 1,
     });
-    const managed = new Set(['web', 'report']);
+    const managed: ManagedResource[] = [
+      { kind: 'Deployment', name: 'web' },
+      { kind: 'CronJob', name: 'report' },
+    ];
     const label = /Whole shop namespace/;
 
     withMeasurementAge(1, undefined, {
       scope: 'namespace',
       pods: [pod('web-1', 'web', 'deployment'), pod('db-0', 'db', 'statefulset')],
     });
-    const { unmount } = render(<CostPanel appName="demo" managedControllers={managed} />);
+    const { unmount } = render(<CostPanel appName="demo" managedResources={managed} />);
     fireEvent.click(screen.getByRole('tab', { name: 'Trends' }));
     expect(screen.getByText(label)).toBeTruthy();
     unmount();
@@ -153,7 +157,7 @@ describe('CostPanel', () => {
       scope: 'application',
       pods: [pod('web-1', 'web', 'deployment'), pod('report-29312345-x', 'report-29312345', 'job')],
     });
-    render(<CostPanel appName="demo" managedControllers={managed} />);
+    render(<CostPanel appName="demo" managedResources={managed} />);
     fireEvent.click(screen.getByRole('tab', { name: 'Trends' }));
     expect(screen.queryByText(label)).toBeNull();
   });

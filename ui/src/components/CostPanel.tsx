@@ -16,12 +16,13 @@ import { AppContext, CostData, DailyCost } from '../utils/api';
 import { sharedNamespace } from '../utils/costInsights';
 import { utcDay } from '../utils/forecast';
 import { formatDay, formatHours, isPartialMeasurement } from '../utils/format';
+import { ManagedResource } from '../utils/ownership';
 import { queryRange } from '../utils/ranges';
 
 export interface CostPanelProps {
   appName: string;
   appCtx?: AppContext;
-  managedControllers?: Set<string>;
+  managedResources?: ManagedResource[];
 }
 
 type TabId = 'actual' | 'resources' | 'trends';
@@ -36,7 +37,7 @@ const TAB_IDS = TABS.map(tab => tab.id);
 
 const ID_PREFIX = 'cost-intel';
 
-export const CostPanel: React.FC<CostPanelProps> = ({ appName, appCtx, managedControllers }) => {
+export const CostPanel: React.FC<CostPanelProps> = ({ appName, appCtx, managedResources }) => {
   // The open tab lives in the URL, so a link to this view opens on the same tab.
   const [activeTab, setActiveTab] = useUrlState<TabId>('costTab', 'actual', TAB_IDS);
   const { loading, error, data, trend, dailyCosts, refetch } = useCostData(appName, appCtx);
@@ -77,7 +78,7 @@ export const CostPanel: React.FC<CostPanelProps> = ({ appName, appCtx, managedCo
             loading={loading}
             error={error}
             onShowResources={showResources}
-            managedControllers={managedControllers}
+            managedResources={managedResources}
             rightsizing={rightsizing}
           />
         )}
@@ -86,7 +87,7 @@ export const CostPanel: React.FC<CostPanelProps> = ({ appName, appCtx, managedCo
             data={data}
             loading={loading}
             error={error}
-            managedControllers={managedControllers}
+            managedResources={managedResources}
             appName={appName}
             appCtx={appCtx}
             rightsizing={rightsizing}
@@ -97,7 +98,7 @@ export const CostPanel: React.FC<CostPanelProps> = ({ appName, appCtx, managedCo
             loading={loading}
             error={error}
             dailyCosts={dailyCosts}
-            namespace={data && data.scope !== 'application' ? sharedNamespace(data, managedControllers)?.namespace : undefined}
+            namespace={data && data.scope !== 'application' ? sharedNamespace(data, managedResources)?.namespace : undefined}
             range={{ ...trendRange, ...rangeData }}
           />
         )}

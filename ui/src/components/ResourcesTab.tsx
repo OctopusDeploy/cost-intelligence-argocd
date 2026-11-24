@@ -4,13 +4,14 @@ import { ErrorNotice, Notice } from './Notice';
 import { OrphanedPodsNotice } from './OrphanedPodsNotice';
 import { RightsizingSection } from './RightsizingSection';
 import { AppContext, CostData, Rightsizing } from '../utils/api';
+import { ManagedResource, ownedByAny } from '../utils/ownership';
 import { groupPodsByController } from '../utils/podGroups';
 
 interface ResourcesTabProps {
   data: CostData | null;
   loading: boolean;
   error: string | null;
-  managedControllers?: Set<string>;
+  managedResources?: ManagedResource[];
   appName?: string;
   appCtx?: AppContext;
   rightsizing?: Rightsizing | null;
@@ -20,7 +21,7 @@ export const ResourcesTab: React.FC<ResourcesTabProps> = ({
   data,
   loading,
   error,
-  managedControllers,
+  managedResources,
   appName,
   appCtx,
   rightsizing = null,
@@ -34,11 +35,11 @@ export const ResourcesTab: React.FC<ResourcesTabProps> = ({
   }
 
   // The backend lists the application's own pods. Records stored before it did list the whole
-  // namespace: when Argo CD lists the application's controllers, keep only the pods they own;
-  // managedControllers is an empty set until the app has any.
+  // namespace: when Argo CD lists the application's controllers, keep only the pods they own, by the
+  // rule the backend measures the application with; managedResources is empty until the app has any.
   const pods =
-    data?.scope !== 'application' && managedControllers && managedControllers.size > 0
-      ? allPods.filter(pod => managedControllers.has(pod.controller || pod.name))
+    data?.scope !== 'application' && managedResources && managedResources.length > 0
+      ? allPods.filter(pod => ownedByAny(managedResources, pod))
       : allPods;
   const groups = groupPodsByController(pods);
   const namespace = allPods[0].namespace;

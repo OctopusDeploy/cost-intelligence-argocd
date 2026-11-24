@@ -1,5 +1,6 @@
-import { CostData, EfficiencyMetrics, PodCost } from './api';
+import { CostData, EfficiencyMetrics } from './api';
 import { isPartialMeasurement } from './format';
+import { ManagedResource, ownedByAny } from './ownership';
 import { ControllerGroup, groupPodsByController } from './podGroups';
 
 export interface CostChange {
@@ -57,15 +58,16 @@ export interface SharedNamespace {
   otherWorkloads: number;
 }
 
-const ownsPod = (managedControllers: Set<string>, pod: PodCost) => managedControllers.has(pod.controller || pod.name);
-
 // sharedNamespace reports whether the latest measurement has pods that none of the application's
-// controllers own. Null when the application has its namespace to itself, or when ownership is unknown
-// (Argo CD lists no controllers for it, or the record has no pods): the namespace figures are then the
+// controllers own, by the rule the backend measures the application with (a CronJob owns the pods of
+// its Jobs). Null when the application has its namespace to itself, or when ownership is unknown (Argo
+// CD lists no controllers for it, or the record has no pods): the namespace figures are then the
 // application's own.
-export function sharedNamespace(data: CostData, managedControllers?: Set<string>): SharedNamespace | null {
-  if (!managedControllers || managedControllers.size === 0 || !data.pods?.length) return null;
-  const others = groupPodsByController(data.pods).filter(group => !managedControllers.has(group.name));
+export function sharedNamespace(data: CostData, managedResources?: ManagedResource[]): SharedNamespace | null {
+  if (!managedResources || managedResources.length === 0 || !data.pods?.length) return null;
+  const others = groupPodsByController(data.pods).filter(
+    group => !group.pods.some(pod => ownedByAny(managedResources, pod))
+  );
   if (others.length === 0) return null;
   return {
     namespace: data.deploymentNamespace || data.pods[0].namespace,
@@ -78,18 +80,18 @@ export function sharedNamespace(data: CostData, managedControllers?: Set<string>
 // the application already is. An older one measured its whole namespace: that is the application's own
 // cost when nothing else ran there, and is otherwise narrowed to the pods of the controllers Argo CD
 // lists for it. Null when ownership is unknown (Argo CD lists no controllers) for an older record.
-export function asApplication(record: CostData, managedControllers?: Set<string>): CostData | null {
+export function asApplication(record: CostData, managedResources?: ManagedResource[]): CostData | null {
   if (record.scope === 'application') return record;
-  if (!managedControllers || managedControllers.size === 0) return null;
-  return sharedNamespace(record, managedControllers) ? scopeToApp(record, managedControllers) : record;
+  if (!managedResources || managedResources.length === 0) return null;
+  return sharedNamespace(record, managedResources) ? scopeToApp(record, managedResources) : record;
 }
 
 // scopeToApp narrows a measurement to the pods the application's controllers own, so its total is
 // the application's cost rather than the namespace's. Null for a record without pods, which cannot be
 // narrowed.
-export function scopeToApp(data: CostData, managedControllers: Set<string>): CostData | null {
+export function scopeToApp(data: CostData, managedResources: ManagedResource[]): CostData | null {
   if (!data.pods) return null;
-  const pods = data.pods.filter(pod => ownsPod(managedControllers, pod));
+  const pods = data.pods.filter(pod => ownedByAny(managedResources, pod));
   return { ...data, pods, totalMonthlyCost: pods.reduce((sum, pod) => sum + pod.totalCost, 0) };
 }
 

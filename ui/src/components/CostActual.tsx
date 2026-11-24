@@ -27,6 +27,7 @@ import {
 } from '../utils/costInsights';
 import { formatMoney, formatPercent, formatSignedPercent, pluralize, sumRounded } from '../utils/format';
 import { THREE_CARD_COLUMNS_MIN } from '../utils/layout';
+import { ManagedResource } from '../utils/ownership';
 import { hasAdvice } from '../utils/rightsizing';
 
 interface CostActualProps {
@@ -35,8 +36,8 @@ interface CostActualProps {
   loading: boolean;
   error: string | null;
   onShowResources?: () => void;
-  // managedControllers names the controllers Argo CD lists for this application.
-  managedControllers?: Set<string>;
+  // managedResources are the resources Argo CD lists for this application that can own pods.
+  managedResources?: ManagedResource[];
   // rightsizing is the Vertical Pod Autoscaler's advice, which replaces the CPU suggestion when it has any.
   rightsizing?: Rightsizing | null;
 }
@@ -47,7 +48,7 @@ export const CostActual: React.FC<CostActualProps> = ({
   loading,
   error,
   onShowResources,
-  managedControllers,
+  managedResources,
   rightsizing = null,
 }) => {
   const t = useTokens();
@@ -72,13 +73,13 @@ export const CostActual: React.FC<CostActualProps> = ({
   // controllers own, and efficiency, idle spend, the breakdown and the recommendation, which exist only
   // for the namespace as a whole, say so.
   const measuredAlone = data.scope === 'application';
-  const shared = measuredAlone ? null : sharedNamespace(data, managedControllers);
-  const latest = asApplication(data, managedControllers) ?? data;
+  const shared = measuredAlone ? null : sharedNamespace(data, managedResources);
+  const latest = asApplication(data, managedResources) ?? data;
   // A measurement taken when the service started has no sync before it to compare with.
   const atInstall = measuredAtInstall(data);
   const earlier = atInstall ? null : previousMeasurement(data, trend?.trend ?? []);
   // An application's own cost is only compared with an earlier cost of its own, never its namespace's.
-  const previous = earlier && (asApplication(earlier, managedControllers) ?? (measuredAlone ? null : earlier));
+  const previous = earlier && (asApplication(earlier, managedResources) ?? (measuredAlone ? null : earlier));
   const kubernetes = latest.totalMonthlyCost;
   const cloud = data.cloudEstimate?.totalMonthlyCost ?? 0;
   const change = costChange(latest, previous);
