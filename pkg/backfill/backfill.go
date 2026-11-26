@@ -159,7 +159,7 @@ func (b *Backfill) Run(ctx context.Context) (Result, error) {
 				<-sem
 				wg.Done()
 			}()
-			counts := b.measure(ctx, ns, byNamespace[ns])
+			counts := b.measure(ctx, ns, byNamespace[ns], apps)
 			mu.Lock()
 			result.add(counts)
 			mu.Unlock()
@@ -225,7 +225,8 @@ func pending(apps []exporter.Application, recorded []models.CostActual, result *
 }
 
 // measure measures one namespace and saves the first record of each Application deploying there.
-func (b *Backfill) measure(ctx context.Context, namespace string, apps []exporter.Application) Result {
+// all are every Application, to tell whether one is the only one deploying to the namespace.
+func (b *Backfill) measure(ctx context.Context, namespace string, apps, all []exporter.Application) Result {
 	var result Result
 	measured, err := hook.MeasureNamespace(ctx, b.client, namespace, b.logger)
 	if err != nil {
@@ -243,6 +244,9 @@ func (b *Backfill) measure(ctx context.Context, namespace string, apps []exporte
 		if owners == nil {
 			owners = models.ManagedResources{}
 		}
+		sole, ok := exporter.SoleApplication(all, namespace)
+		measured.SoleApplication(ok && sole == app.Ref)
+		measured.Peers(exporter.PeerWorkloads(all, namespace, app.Ref))
 		actual := measured.Record(app.Ref, owners, time.Time{}, models.MeasuredOnInstall)
 		saved, err := b.store.SaveFirstActual(ctx, actual)
 		switch {

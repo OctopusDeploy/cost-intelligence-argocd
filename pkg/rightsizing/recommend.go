@@ -41,6 +41,11 @@ func Recommend(namespace string, resources models.ManagedResources, vpas []VPA, 
 		if owner.Namespace != "" && owner.Namespace != namespace {
 			continue
 		}
+		// An HTTPRoute, a ScaledObject or an operator's custom resource owns pods for cost, but is no
+		// workload to size: it is listed only when a VPA targets it.
+		if _, targeted := vpaFor(owner, vpas); !targeted && !models.IsWorkloadKind(owner.Kind) {
+			continue
+		}
 		owned := ownedBy(owner, namespace, containers)
 		workload := models.WorkloadRightsizing{
 			Kind:       owner.Kind,

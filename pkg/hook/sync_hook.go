@@ -40,6 +40,7 @@ type SyncHook struct {
 	measureDelay time.Duration
 	logger       *log.Logger
 	retries      *retries
+	applications exporter.ApplicationLister
 }
 
 // retries are the pending retries of syncs measured without OpenCost data, at most one per
@@ -342,7 +343,33 @@ func (h *SyncHook) measureActualCosts(ctx context.Context, notification *models.
 		owners = models.ManagedResources(notification.Resources).PodOwners()
 	}
 	app := models.AppRef{Namespace: notification.ApplicationNamespace, Name: notification.ApplicationName}
+	sole, peers := h.neighbours(ctx, app, notification.Namespace)
+	measured.SoleApplication(sole)
+	measured.Peers(peers)
 	return measured.Record(app, owners, notification.SyncTimestamp, models.MeasuredOnSync), nil
+}
+
+// WithApplications lets the hook tell when an application is the only one deploying to its namespace,
+// which then owns the pods no application's controllers claim (UNOWNED_POD_LABELS).
+func (h *SyncHook) WithApplications(applications exporter.ApplicationLister) *SyncHook {
+	h.applications = applications
+	return h
+}
+
+// neighbours says whether app is the only Application deploying to the namespace it was notified for,
+// and what the others' resources are. An Application list that can't be read is no one and none: such
+// pods stay unowned.
+func (h *SyncHook) neighbours(ctx context.Context, app models.AppRef, namespace string) (bool, models.ManagedResources) {
+	if h.applications == nil {
+		return false, nil
+	}
+	apps, err := h.applications.List(ctx)
+	if err != nil {
+		h.logger.Printf("Warning: listing Applications for %s: %v\n", namespace, err)
+		return false, nil
+	}
+	sole, ok := exporter.SoleApplication(apps, namespace)
+	return ok && sole == app, exporter.PeerWorkloads(apps, namespace, app)
 }
 
 // Namespace is a deployment namespace as OpenCost measured it over the last 24 hours, from which each
@@ -433,6 +460,22 @@ func MeasureNamespace(ctx context.Context, client *opencost.Client, namespace st
 		)
 	}
 	return measured, nil
+}
+
+// Peers tells the measurement the resources of the other applications deploying to the namespace, so
+// that an owner label does not give their pods to this one too. Call it before Record.
+func (n *Namespace) Peers(peers models.ManagedResources) {
+	if n.pods != nil {
+		n.pods.Peers(peers)
+	}
+}
+
+// SoleApplication tells the measurement whether one application is the only one deploying to the
+// namespace: it then owns the pods no application's controllers claim. Call it before Record.
+func (n *Namespace) SoleApplication(sole bool) {
+	if n.pods != nil {
+		n.pods.SoleApplication(sole)
+	}
 }
 
 // HasData reports whether OpenCost had enough data for the namespace. Without it, the namespace's cost

@@ -19,6 +19,19 @@ Figures cover only the pods of the workloads Argo CD manages for the application
 
 A measurement stored by an earlier version, or sent by a notifications template without the application's resources, covers the whole namespace. On a shared namespace the tab then narrows the monthly cost to the application's pods and says which other figures still cover the whole namespace.
 
+#### Pods without a controller
+
+A pod belongs to the application whose workload owns it. Some pods have no owner Argo CD lists, and are attributed another way, so they are not left out of every application:
+
+- **Operator-created workloads.** Pods of a StatefulSet or Deployment an operator creates (a database or message broker, for example) belong to the custom resource that Argo CD lists, found through the pod's labels. The built-in labels cover the common operators; [`OWNER_LABELS`](configuration.md#backend) adds others, and [`NON_OWNER_KINDS`](configuration.md#backend) names listed kinds that never own pods. When several Applications share a namespace, a pod found through a label is never given to an Application if another one owns it too, so their costs never add up to more than the namespace.
+- **Bare pods.** A pod with no controller, such as a CI job pod created by GitLab Runner or Airflow's Kubernetes executor, is charged to the only application deployed in its namespace when it carries one of the [`UNOWNED_POD_LABELS`](configuration.md#backend). For example, `project.runner.gitlab.com/name` charges GitLab Runner's job pods to the application that deploys the runner. Nothing is attributed this way until you set a label. With several applications in the namespace, such a pod stays in the namespace's cost: each of them would claim it. Each pod is counted once, under one application.
+
+Pods that still belong to no application stay in the namespace's cost.
+
+#### Grouping job pods
+
+An application with thousands of short-lived pods, such as CI jobs, lists them grouped instead of one by one. A group is named by the values of [`UNMANAGED_GROUP_LABELS`](configuration.md#backend) the pods carry, so the cost reads per team and project. Grouping is presentation only; it never changes which application a pod is charged to.
+
 ## Actual costs
 
 ![Actual costs: monthly cost, change since the last sync, rightsizing advice, cost breakdown and resource efficiency](images/actual-costs.webp)

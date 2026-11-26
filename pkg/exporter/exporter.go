@@ -234,6 +234,10 @@ func (e *Exporter) costSamples(ctx context.Context, apps []Application) []sample
 			e.fail(StageOpenCost, err)
 			continue
 		}
+		if s, ok := costs.(interface{ SoleApplication(bool) }); ok {
+			_, sole := SoleApplication(apps, ns)
+			s.SoleApplication(sole)
+		}
 		measured[ns] = costs
 	}
 
@@ -254,6 +258,9 @@ func (e *Exporter) costSamples(ctx context.Context, apps []Application) []sample
 			if !ok {
 				complete = false
 				break
+			}
+			if p, ok := costs.(interface{ Peers(models.ManagedResources) }); ok {
+				p.Peers(PeerWorkloads(apps, ns, app.Ref))
 			}
 			total = add(total, costs.HourlyCostOf(app.Workloads))
 		}
@@ -320,6 +327,26 @@ func appNamespaces(app Application) map[string]bool {
 	return namespaces
 }
 
+// PeerWorkloads returns the pod-owning resources of the other Applications deploying to namespace on
+// this cluster, which an owner label must not take pods from (models.ManagedResources.OwnsPodAmong).
+func PeerWorkloads(apps []Application, namespace string, self models.AppRef) models.ManagedResources {
+	peers := models.ManagedResources{}
+	for _, app := range apps {
+		if app.Ref == self || !app.Destination.Local() {
+			continue
+		}
+		if app.Destination.Namespace != namespace && !appNamespaces(app)[namespace] {
+			continue
+		}
+		for _, w := range app.Workloads {
+			if w.Namespace == "" || w.Namespace == namespace {
+				peers = append(peers, w)
+			}
+		}
+	}
+	return peers
+}
+
 func add(a, b opencost.HourlyCost) opencost.HourlyCost {
 	return opencost.HourlyCost{
 		CPU: a.CPU + b.CPU, Memory: a.Memory + b.Memory, GPU: a.GPU + b.GPU, Storage: a.Storage + b.Storage,
@@ -335,4 +362,26 @@ func sortedKeys(m map[string]bool) []string {
 	}
 	sort.Strings(keys)
 	return keys
+}
+
+// SoleApplication returns the Application that is the only one deploying to namespace on this
+// cluster, an Application being there when it deploys to it by default or has a workload in it.
+// Applications deploying to another cluster are not there, and the access Application is not listed.
+// False when no Application, or several, deploy there.
+func SoleApplication(apps []Application, namespace string) (models.AppRef, bool) {
+	var sole models.AppRef
+	found := false
+	for _, app := range apps {
+		if !app.Destination.Local() {
+			continue
+		}
+		if app.Destination.Namespace != namespace && !appNamespaces(app)[namespace] {
+			continue
+		}
+		if found {
+			return models.AppRef{}, false
+		}
+		sole, found = app.Ref, true
+	}
+	return sole, found
 }
