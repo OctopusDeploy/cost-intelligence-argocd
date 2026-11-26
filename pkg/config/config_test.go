@@ -389,3 +389,120 @@ func TestLoadConfig_LogLevelIgnoresCaseAndSpaces(t *testing.T) {
 	assert.True(t, cfg.Debug())
 	assert.Equal(t, LogLevelDebug, cfg.LogLevel, "read as debug")
 }
+
+func TestValidate_CostProvider(t *testing.T) {
+	t.Parallel()
+
+	base := func(provider, clusterID string) Config {
+		return Config{
+			Database:          DatabaseConfig{Password: "secret"},
+			WebhookSecret:     testWebhookSecret,
+			OpenCost:          OpenCostConfig{BaseURL: "http://kubecost-cost-analyzer:9090/model"},
+			CostProvider:      provider,
+			KubecostClusterID: clusterID,
+		}
+	}
+	tests := []struct {
+		name     string
+		cfg      Config
+		wantText string
+	}{
+		{name: "opencost by default", cfg: base("", "")},
+		{name: "opencost", cfg: base(ProviderOpenCost, "")},
+		{name: "kubecost with its cluster", cfg: base(ProviderKubecost, "eks-prod-1")},
+		{name: "kubecost without a cluster", cfg: base(ProviderKubecost, ""), wantText: "KUBECOST_CLUSTER_ID is required"},
+		{name: "unknown provider", cfg: base("cloudhealth", ""), wantText: `COST_PROVIDER "cloudhealth"`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := tt.cfg.Validate()
+
+			if tt.wantText == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantText)
+		})
+	}
+}
+
+func TestValidate_ExporterModeChecksTheCostProviderToo(t *testing.T) {
+	t.Parallel()
+
+	cfg := Config{
+		Database:         DatabaseConfig{Password: "secret"},
+		Mode:             ModeExporter,
+		MetricsPort:      9102,
+		ExporterInterval: 5 * time.Minute,
+		OpenCost:         OpenCostConfig{BaseURL: "http://kubecost-cost-analyzer:9090/model"},
+		CostProvider:     ProviderKubecost,
+	}
+
+	require.ErrorContains(t, cfg.Validate(), "KUBECOST_CLUSTER_ID is required")
+}
+
+func TestLoadConfig_CostProviderDefaultsToOpenCost(t *testing.T) {
+	t.Setenv("DB_PASSWORD", "test-password")
+	t.Setenv("OPENCOST_BASE_URL", "http://opencost:9003")
+
+	cfg, err := LoadConfig()
+	require.NoError(t, err)
+
+	assert.Equal(t, ProviderOpenCost, cfg.CostProvider)
+	assert.Empty(t, cfg.KubecostClusterID)
+}
+
+func TestLoadConfig_ReadsTheKubecostClusterMapFile(t *testing.T) {
+	t.Setenv("DB_PASSWORD", "test-password")
+	t.Setenv("OPENCOST_BASE_URL", "http://kubecost:9090/model")
+	t.Setenv("COST_PROVIDER", "kubecost")
+	t.Setenv("KUBECOST_CLUSTER_ID", "eks-prod-1")
+	t.Setenv("KUBECOST_CLUSTER_MAP_FILE", "/etc/cost-intelligence/clusters.json")
+
+	cfg, err := LoadConfig()
+	require.NoError(t, err)
+
+	assert.Equal(t, "/etc/cost-intelligence/clusters.json", cfg.KubecostClusterMapFile)
+}
+
+func TestAPIKeyHeader(t *testing.T) {
+	tests := map[string]struct {
+		cfg         Config
+		name, value string
+	}{
+		"bearer by default":    {Config{CostProvider: ProviderKubecost, KubecostAPIKey: "k", KubecostAPIKeyHeader: "Authorization"}, "Authorization", "Bearer k"},
+		"empty header name":    {Config{CostProvider: ProviderKubecost, KubecostAPIKey: "k"}, "Authorization", "Bearer k"},
+		"custom header is raw": {Config{CostProvider: ProviderKubecost, KubecostAPIKey: "k", KubecostAPIKeyHeader: "X-Api-Key"}, "X-Api-Key", "k"},
+		"no key":               {Config{CostProvider: ProviderKubecost}, "", ""},
+		"opencost ignores it":  {Config{CostProvider: ProviderOpenCost, KubecostAPIKey: "k"}, "", ""},
+	}
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			gotName, gotValue := tt.cfg.APIKeyHeader()
+			assert.Equal(t, tt.name, gotName)
+			assert.Equal(t, tt.value, gotValue)
+		})
+	}
+}
+
+func TestRetentionDays(t *testing.T) {
+	assert.Equal(t, EKSOptimizedRetentionDays, (&Config{CostProvider: ProviderKubecost, KubecostEKSOptimized: true}).RetentionDays())
+	assert.Zero(t, (&Config{CostProvider: ProviderKubecost}).RetentionDays())
+	assert.Zero(t, (&Config{CostProvider: ProviderOpenCost, KubecostEKSOptimized: true}).RetentionDays())
+}
+
+func TestValidate_KubecostOnlySettingsNeedKubecost(t *testing.T) {
+	cfg := Config{CostProvider: ProviderOpenCost, KubecostEKSOptimized: true, OpenCost: OpenCostConfig{BaseURL: "http://opencost:9003"}}
+
+	assert.ErrorContains(t, cfg.validateCostBackend(), "only apply with COST_PROVIDER=kubecost")
+}
+
+func TestValidate_APIKeyHeaderName(t *testing.T) {
+	cfg := Config{CostProvider: ProviderKubecost, KubecostClusterID: "c", KubecostAPIKey: "k", KubecostAPIKeyHeader: "Bad Header",
+		OpenCost: OpenCostConfig{BaseURL: "http://kubecost:9090/model"}}
+
+	assert.ErrorContains(t, cfg.validateCostBackend(), "not a valid header name")
+}

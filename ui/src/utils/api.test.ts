@@ -240,6 +240,23 @@ describe('application requests', () => {
   });
 });
 
+describe('getMonthCost', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('reads the calendar month of the application', async () => {
+    const month = { month: '2026-11', toDate: 34.5, projected: 60, dailyRunRate: 2, runRateDays: 7, daysElapsed: 18, daysInMonth: 30 };
+    const fetchMock = stubFetch(url => (url.includes('/month') ? { body: { available: true, month } } : undefined));
+    const { default: api } = await loadApi();
+
+    const got = await api.getMonthCost('redis');
+
+    expect(String(fetchMock.mock.calls[0][0])).toBe('/extensions/cost-intel/api/cost-analysis/redis/month');
+    expect(got?.month?.projected).toBe(60);
+  });
+});
+
 describe('getDailyCosts', () => {
   afterEach(() => {
     vi.unstubAllGlobals();
@@ -256,5 +273,23 @@ describe('getDailyCosts', () => {
       '/extensions/cost-intel/api/cost-analysis/redis/daily?days=30',
       '/extensions/cost-intel/api/cost-analysis/redis/daily?from=2026-09-01&to=2026-09-30',
     ]);
+  });
+
+  it('reach the fetch helpers: the cluster picked on the default export is the one they read', async () => {
+    const fetchMock = stubFetch(anyApp, config({ namespace: 'argocd', name: 'cost-intel' }), gateApp('platform'), url =>
+      url.includes('/api/cost-analysis/waste') || url.includes('/api/cost-analysis/namespaces')
+        ? { body: { namespaces: [], apps: [] } }
+        : undefined
+    );
+    const { default: api, fetchNamespaces, fetchWasteRanking } = await loadApi();
+    api.setCluster('eks-eu');
+    api.setClusterFilter('eks-hub');
+
+    await fetchNamespaces();
+    await fetchWasteRanking();
+
+    const requested = fetchMock.mock.calls.map(([url]) => String(url));
+    expect(requested).toContain('/extensions/cost-intel/api/cost-analysis/namespaces?cluster=eks-eu');
+    expect(requested).toContain('/extensions/cost-intel/api/cost-analysis/waste?cluster=eks-hub');
   });
 });

@@ -108,4 +108,21 @@ describe('useNamespaceData', () => {
 
     expect(vi.mocked(fetchNamespaces)).not.toHaveBeenCalled();
   });
+
+  it('keeps a namespace of the same name on two clusters apart', async () => {
+    vi.mocked(fetchNamespaces).mockResolvedValue([
+      { ...summary('monitoring', 900), cluster: 'eks-a' },
+      { ...summary('monitoring', 400), cluster: 'eks-b' },
+    ]);
+    const { result } = renderHook(() => useNamespaceData());
+    await settle();
+
+    expect(result.current.selectedNs).toBe('eks-a/monitoring');
+    expect(vi.mocked(fetchNamespaceApps)).toHaveBeenLastCalledWith('monitoring', 'eks-a');
+
+    act(() => result.current.setSelectedNs('eks-b/monitoring'));
+    await settle();
+    expect(vi.mocked(fetchNamespaceApps)).toHaveBeenLastCalledWith('monitoring', 'eks-b');
+    expect(result.current.selectedNs).toBe('eks-b/monitoring');
+  });
 });

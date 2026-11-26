@@ -75,10 +75,10 @@ func (s *instrumented) GetActualsInDateRange(ctx context.Context, app models.App
 	return s.next.GetActualsInDateRange(ctx, app, startTime, endTime)
 }
 
-func (s *instrumented) GetNamespaceCostSummary(ctx context.Context, namespace string, days int) (_ float64, err error) {
+func (s *instrumented) GetNamespaceCostSummary(ctx context.Context, cluster, namespace string, days int) (_ float64, err error) {
 	done := s.track("GetNamespaceCostSummary")
 	defer func() { done(err) }()
-	return s.next.GetNamespaceCostSummary(ctx, namespace, days)
+	return s.next.GetNamespaceCostSummary(ctx, cluster, namespace, days)
 }
 
 func (s *instrumented) ListNamespaces(ctx context.Context) (_ []models.NamespaceSummary, err error) {
@@ -87,10 +87,10 @@ func (s *instrumented) ListNamespaces(ctx context.Context) (_ []models.Namespace
 	return s.next.ListNamespaces(ctx)
 }
 
-func (s *instrumented) GetLatestActualsForNamespace(ctx context.Context, namespace string) (_ []models.CostActual, err error) {
+func (s *instrumented) GetLatestActualsForNamespace(ctx context.Context, cluster, namespace string) (_ []models.CostActual, err error) {
 	done := s.track("GetLatestActualsForNamespace")
 	defer func() { done(err) }()
-	return s.next.GetLatestActualsForNamespace(ctx, namespace)
+	return s.next.GetLatestActualsForNamespace(ctx, cluster, namespace)
 }
 
 func (s *instrumented) GetRecentActuals(ctx context.Context, app models.AppRef, limit int) (_ []models.CostActual, err error) {

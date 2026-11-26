@@ -34,6 +34,8 @@ type pod struct {
 type fakeOpenCost struct {
 	pods   map[string][]pod
 	broken map[string]bool
+	// labels are the labels of pods, by pod name.
+	labels map[string]map[string]string
 	delay  time.Duration
 
 	mu        sync.Mutex
@@ -63,7 +65,7 @@ func (f *fakeOpenCost) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		for _, p := range pods {
 			allocations[p.name] = opencost.AllocationData{
 				Start: start, End: end, CPUCost: p.cost, TotalCost: p.cost,
-				Properties: opencost.AllocationProperties{Pod: p.name, Namespace: ns, ControllerKind: p.kind, Controller: p.controller},
+				Properties: opencost.AllocationProperties{Pod: p.name, Namespace: ns, ControllerKind: p.kind, Controller: p.controller, Labels: f.labels[p.name]},
 			}
 		}
 		_ = json.NewEncoder(w).Encode(opencost.AllocationResponse{Code: 200, Data: []map[string]opencost.AllocationData{allocations}})
@@ -309,6 +311,47 @@ func TestRun_StoresTheSyncHooksRecordMarkedAsMeasuredAtInstall(t *testing.T) {
 	require.NotNil(t, saved.App, "the application's share is measured from its controllers")
 	assert.Equal(t, models.ManagedResources{deployment("shop", "web")}, saved.App.Controllers)
 	assert.InDelta(t, 60.0, saved.App.TotalMonthlyCost, 1e-6, "its own pod: 2 a day for 30 days")
+}
+
+// Not parallel: the unowned pod labels are process-wide.
+func TestRun_TheOnlyApplicationOwnsTheLabelledBarePods(t *testing.T) {
+	t.Cleanup(models.ResetOwnership)
+	require.NoError(t, models.ConfigureUnownedPodLabels("kubernetes_executor=True"))
+	pods := map[string][]pod{"shop": {{"web-1", "deployment", "web", 2}, {"task-1", "", "", 3}, {"bare-1", "", "", 5}}}
+	labels := map[string]map[string]string{"task-1": {"kubernetes_executor": "True"}}
+	web := app("web", local("shop"), deployment("shop", "web"))
+
+	alone := newFakeStore()
+	run(t, &fakeOpenCost{pods: pods, labels: labels}, alone, 1, web)
+	assert.InDelta(t, 150.0, alone.records[web.Ref].App.TotalMonthlyCost, 1e-6, "its pod and the labelled bare pod: (2+3) a day for 30 days")
+
+	shared := newFakeStore()
+	run(t, &fakeOpenCost{pods: pods, labels: labels}, shared, 1, web, app("batch", local("shop"), deployment("shop", "batch")))
+	assert.InDelta(t, 60.0, shared.records[web.Ref].App.TotalMonthlyCost, 1e-6, "with another application in the namespace, a bare pod is no one's")
+}
+
+func TestRun_TwoApplicationsNeverClaimTheSamePods(t *testing.T) {
+	t.Parallel()
+
+	oc := &fakeOpenCost{
+		pods: map[string][]pod{"shop": {
+			{"web-1", "deployment", "web", 2}, {"gen-0", "statefulset", "chi-gen-0", 7}, {"db-0", "statefulset", "chi-db-0", 11},
+		}},
+		labels: map[string]map[string]string{"web-1": {"app": "web"}, "gen-0": {"app": "gen"}, "db-0": {"app": "db"}},
+	}
+	routes := app("routes", local("shop"),
+		models.ManagedResource{Kind: "HTTPRoute", Name: "web", Namespace: "shop"},
+		models.ManagedResource{Kind: "ScaledObject", Name: "gen", Namespace: "shop"},
+		models.ManagedResource{Kind: "Cluster", Name: "db", Namespace: "shop"})
+	web := app("web", local("shop"), deployment("shop", "web"), models.ManagedResource{Kind: "Gateway", Name: "gen", Namespace: "shop"})
+	store := newFakeStore()
+
+	run(t, oc, store, 1, routes, web)
+
+	routesCost, webCost := store.records[routes.Ref].App.TotalMonthlyCost, store.records[web.Ref].App.TotalMonthlyCost
+	assert.InDelta(t, 11*30.0, routesCost, 1e-6, "only the pod no other application matches")
+	assert.InDelta(t, 2*30.0, webCost, 1e-6, "its Deployment's pod, not the one both match by label")
+	assert.LessOrEqual(t, routesCost+webCost, store.records[web.Ref].TotalMonthlyCost, "never more than the namespace")
 }
 
 func TestRun_AnApplicationWithoutWorkloadsIsMeasuredAsOwningNothing(t *testing.T) {

@@ -39,7 +39,7 @@ const ID_PREFIX = 'cost-intel';
 export const CostPanel: React.FC<CostPanelProps> = ({ appName, appCtx, managedControllers }) => {
   // The open tab lives in the URL, so a link to this view opens on the same tab.
   const [activeTab, setActiveTab] = useUrlState<TabId>('costTab', 'actual', TAB_IDS);
-  const { loading, error, data, trend, dailyCosts, refetch } = useCostData(appName, appCtx);
+  const { loading, error, data, trend, dailyCosts, month, refetch } = useCostData(appName, appCtx);
   // The Trends range lives in the URL. Its series is fetched only while Trends is open, and not for
   // the last 30 days, which useCostData already has.
   const today = utcDay();
@@ -79,6 +79,7 @@ export const CostPanel: React.FC<CostPanelProps> = ({ appName, appCtx, managedCo
             onShowResources={showResources}
             managedControllers={managedControllers}
             rightsizing={rightsizing}
+            month={month}
           />
         )}
         {activeTab === 'resources' && (

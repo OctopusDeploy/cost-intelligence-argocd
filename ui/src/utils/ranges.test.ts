@@ -75,6 +75,8 @@ describe('granularity', () => {
     expect(granularity({ from: '2026-01-01', to: '2026-04-02' })).toBe('day'); // 92 days
     expect(granularity(presetRange('6m', TODAY))).toBe('week');
     expect(granularity(presetRange('1y', TODAY))).toBe('month');
+    expect(granularity(presetRange('1y', TODAY), true)).toBe('week'); // a backend with little history
+    expect(granularity(presetRange('90d', TODAY), true)).toBe('day');
   });
 });
 

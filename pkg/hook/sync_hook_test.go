@@ -65,7 +65,7 @@ func (m *mockStorage) GetActualsInDateRange(ctx context.Context, app models.AppR
 	return nil, nil
 }
 
-func (m *mockStorage) GetNamespaceCostSummary(ctx context.Context, namespace string, days int) (float64, error) {
+func (m *mockStorage) GetNamespaceCostSummary(ctx context.Context, _, namespace string, days int) (float64, error) {
 	if m.getNamespaceCostSummaryFn != nil {
 		return m.getNamespaceCostSummaryFn(ctx, namespace, days)
 	}
@@ -76,7 +76,7 @@ func (m *mockStorage) ListNamespaces(_ context.Context) ([]models.NamespaceSumma
 	return nil, nil
 }
 
-func (m *mockStorage) GetLatestActualsForNamespace(_ context.Context, _ string) ([]models.CostActual, error) {
+func (m *mockStorage) GetLatestActualsForNamespace(_ context.Context, _, _ string) ([]models.CostActual, error) {
 	return nil, nil
 }
 
@@ -372,6 +372,32 @@ func TestDeploysHere(t *testing.T) {
 	assert.True(t, DeploysHere(&models.SyncNotification{DestinationName: "in-cluster"}))
 	assert.False(t, DeploysHere(&models.SyncNotification{DestinationServer: "https://prod.example.com"}))
 	assert.False(t, DeploysHere(&models.SyncNotification{DestinationName: "prod"}))
+}
+
+func TestOnApplicationSync_RecordsTheClusterMeasured(t *testing.T) {
+	t.Parallel()
+
+	srv := newOpenCostTestServer(t)
+	defer srv.Close()
+
+	var saved *models.CostActual
+	store := &mockStorage{
+		saveActualFn: func(_ context.Context, actual *models.CostActual) error {
+			saved = actual
+			return nil
+		},
+	}
+
+	err := newTestHook(t, srv, store).OnApplicationSync(opencost.WithCluster(context.Background(), "eu"), &models.SyncNotification{
+		ApplicationName:      "my-app",
+		ApplicationNamespace: "argocd",
+		Namespace:            "test-ns",
+		SyncResult:           "Succeeded",
+		SyncTimestamp:        time.Now(),
+	})
+	require.NoError(t, err)
+	require.NotNil(t, saved)
+	assert.Equal(t, "eu", saved.Cluster, "a namespace is its cluster and name")
 }
 
 func TestOnApplicationSync_Success_StoresCostAndEfficiency(t *testing.T) {

@@ -385,6 +385,39 @@ func TestParsePodBreakdown_Empty(t *testing.T) {
 	assert.Empty(t, got)
 }
 
+func TestPodAllocations_PodsCarryTheirGroup(t *testing.T) {
+	t.Parallel()
+
+	pod := func(name string, labels map[string]string) AllocationData {
+		return AllocationData{
+			CPUCost: 1, TotalCost: 1,
+			Properties: AllocationProperties{Pod: name, Namespace: "ci", Labels: labels},
+		}
+	}
+	resp := AllocationResponse{Data: []map[string]AllocationData{{
+		"job":       pod("job", map[string]string{"team": "design", "project_runner_gitlab_com_name": "git-cleaner"}),
+		"team-only": pod("team-only", map[string]string{"team": "infra"}),
+		"plain":     pod("plain", nil),
+	}}}
+	groupLabels := []string{"team", sanitizeLabelKey("project.runner.gitlab.com/name")}
+
+	got := map[string]string{}
+	for _, p := range (&PodAllocations{resp: resp, groupLabels: groupLabels}).Pods() {
+		got[p.Name] = p.Group
+	}
+	assert.Equal(t, map[string]string{"job": "design / git-cleaner", "team-only": "infra", "plain": ""}, got)
+
+	for _, p := range (&PodAllocations{resp: resp}).Pods() {
+		assert.Empty(t, p.Group, "grouping is off without labels")
+	}
+}
+
+func TestSanitizeLabelKey(t *testing.T) {
+	t.Parallel()
+	assert.Equal(t, "project_runner_gitlab_com_name", sanitizeLabelKey("project.runner.gitlab.com/name"))
+	assert.Equal(t, "team", sanitizeLabelKey("team"))
+}
+
 func TestParsePodBreakdown_ExtractsPropertiesAndAppliesMultiplier(t *testing.T) {
 	t.Parallel()
 
@@ -604,6 +637,62 @@ func TestParsePodBreakdown_ReplacedPod_SharesNamespacePeriod(t *testing.T) {
 	assert.InDelta(t, 60.0, total, 1e-9) // $1 over 12h
 }
 
+// Pods that came and went, like the jobs an Airflow worker launches, are not projected from their
+// seconds of life: nothing is running at the end of the window, so it is the whole window.
+func TestParsePodBreakdown_EndedPodsAreProjectedFromTheWholeWindow(t *testing.T) {
+	t.Parallel()
+
+	end := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
+	jobStart := end.Add(-10 * time.Hour)
+	resp := AllocationResponse{
+		Data: []map[string]AllocationData{{
+			"job-1": {Start: jobStart, End: jobStart.Add(20 * time.Second), CPUCost: 0.0001, TotalCost: 0.0001},
+		}},
+		windowStart: end.Add(-24 * time.Hour),
+		windowEnd:   end,
+	}
+
+	got := parsePodBreakdown(resp)
+	require.Len(t, got, 1)
+	assert.InDelta(t, 0.0001*30, got[0].TotalCost, 1e-9, "a day's cost projected onto a month, not 20 seconds' onto 30 days")
+
+	// A job still running beside them does not date the period: the span from the first job is hours,
+	// not the application's age.
+	resp.Data[0]["job-2"] = AllocationData{Start: end.Add(-time.Hour), End: end, CPUCost: 1, TotalCost: 1}
+	assert.InDelta(t, 30.0, monthlyFactor(measuredPeriod(resp)), 1e-9)
+
+	// With every pod still running, the earliest start dates a young application.
+	running := AllocationResponse{
+		Data: []map[string]AllocationData{{
+			"web-1": {Start: end.Add(-6 * time.Hour), End: end, CPUCost: 1, TotalCost: 1},
+			"web-2": {Start: end.Add(-10 * time.Hour), End: end, CPUCost: 1, TotalCost: 1},
+		}},
+		windowStart: resp.windowStart,
+		windowEnd:   end,
+	}
+	assert.InDelta(t, 720.0/10, monthlyFactor(measuredPeriod(running)), 1e-9)
+}
+
+// Kubecost reports its reconciliation with the cloud bill beside each cost, not in it: a pod's
+// $2.99 of cross-zone network cost the provider never charged carries an adjustment of -$2.99, and
+// Kubecost's own total is the sum.
+func TestAllocationData_FoldsCostAdjustmentsIntoTheCosts(t *testing.T) {
+	t.Parallel()
+
+	var got AllocationData
+	require.NoError(t, json.Unmarshal([]byte(`{
+		"cpuCost": 0.33689, "cpuCostAdjustment": -0.24182,
+		"ramCost": 0.06773, "ramCostAdjustment": -0.04862,
+		"networkCost": 2.99116, "networkCostAdjustment": -2.99111,
+		"totalCost": 0.11425
+	}`), &got))
+
+	assert.InDelta(t, 0.09507, got.CPUCost, 1e-9)
+	assert.InDelta(t, 0.01911, got.RAMCost, 1e-9)
+	assert.InDelta(t, 0.00005, got.NetworkCost, 1e-9)
+	assert.InDelta(t, 0.11423, got.componentCost(), 1e-9, "Kubecost's own total, 0.11425, rounds each field on its own")
+}
+
 func TestParseChargebackEntries_ScalesByMeasuredPeriod(t *testing.T) {
 	t.Parallel()
 
@@ -727,6 +816,26 @@ func TestParsePodBreakdown_TotalIsTheSumOfItsParts(t *testing.T) {
 	assert.InDelta(t, (0.00132+0.00018+0.00002+0.00001)*4320, got[0].TotalCost, 1e-9, "storage and network stay in the total")
 }
 
+func TestParsePodBreakdown_ReportsStorageNetworkAndGPU(t *testing.T) {
+	t.Parallel()
+
+	end := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
+	pod := roundedAllocation(end)
+	pod.PVCost = 0.00002
+	pod.NetworkCost = 0.00001
+	pod.LoadBalancerCost = 0.00003
+	pod.GPUCost = 0.00004
+	got := parsePodBreakdown(AllocationResponse{Data: []map[string]AllocationData{{"web-1": pod}}})
+	require.Len(t, got, 1)
+
+	// The columns a reader sees beside the total add up to it.
+	p := got[0]
+	assert.InDelta(t, 0.00002*4320, p.StorageCost, 1e-9)
+	assert.InDelta(t, 0.00004*4320, p.NetworkCost, 1e-9, "load balancers count as network")
+	assert.InDelta(t, 0.00004*4320, p.GPUCost, 1e-9)
+	assert.InDelta(t, p.CPUCost+p.RAMCost+p.StorageCost+p.NetworkCost+p.GPUCost, p.TotalCost, 1e-9)
+}
+
 func TestParseChargebackEntries_TotalIsTheSumOfItsParts(t *testing.T) {
 	t.Parallel()
 
@@ -764,6 +873,23 @@ func TestParseDailyTimeSeries_TotalIsTheSumOfItsParts(t *testing.T) {
 	require.Len(t, got, 1)
 
 	assert.InDelta(t, got[0].CPUCost+got[0].MemoryCost, got[0].TotalCost, 1e-12)
+}
+
+// Kubecost keeps hourly data for a few days, then a day per entry, then a month per entry. A daily
+// series asked over a period it has only consolidated comes back as one entry spanning the period,
+// which must not be stored as the cost of its first day.
+func TestParseDailyTimeSeries_SkipsConsolidatedBuckets(t *testing.T) {
+	t.Parallel()
+
+	day := time.Date(2026, 11, 17, 0, 0, 0, 0, time.UTC)
+	month := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
+	got := parseDailyTimeSeries(AllocationResponse{Data: []map[string]AllocationData{
+		{"web": {Start: month, End: month.AddDate(0, 1, 0), CPUCost: 30}},
+		{"web": {Start: day, End: day.Add(24 * time.Hour), CPUCost: 1}},
+	}})
+
+	require.Len(t, got, 1)
+	assert.Equal(t, "2026-11-17", got[0].Date)
 }
 
 func TestParseChargebackEntries_Efficiency(t *testing.T) {
@@ -818,10 +944,12 @@ func TestGetNamespaceCost_DecodesMeasuredPeriodFromWire(t *testing.T) {
 
 	// OpenCost's own wire format: start and end are RFC 3339 strings, with fractional
 	// seconds on the end of the window.
+	// The namespace is still running at the end of the window, so its own six hours are the period.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
+		end := time.Now().UTC().Truncate(time.Second)
 		_, _ = w.Write([]byte(`{"code":200,"data":[{"new-ns":{` +
-			`"start":"2026-10-01T06:00:00Z","end":"2026-10-01T12:00:00.000000000Z",` +
+			`"start":"` + end.Add(-6*time.Hour).Format(time.RFC3339) + `","end":"` + end.Format("2006-01-02T15:04:05.000000000Z07:00") + `",` +
 			`"cpuCost":0.5,"ramCost":0.5,"totalCost":1.0}}]}`))
 	}))
 	defer srv.Close()
@@ -1203,4 +1331,37 @@ func TestGetClusterOverhead_Non200Response(t *testing.T) {
 	_, err := client.GetClusterOverhead(context.Background())
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "500")
+}
+
+// The parts of the network cost shrink with the adjustment, so they still add up to it.
+func TestAllocationData_ScalesNetworkPartsWithTheirAdjustment(t *testing.T) {
+	t.Parallel()
+
+	var got AllocationData
+	require.NoError(t, json.Unmarshal([]byte(`{
+		"networkCost": 7.77333, "networkCrossZoneCost": 7.77286, "networkInternetCost": 0.00047,
+		"networkCostAdjustment": -7.77318
+	}`), &got))
+
+	assert.InDelta(t, 0.00015, got.NetworkCost, 1e-9)
+	assert.InDelta(t, got.NetworkCost, got.NetworkCrossZoneCost+got.NetworkInternetCost, 1e-9)
+	assert.Less(t, got.NetworkCrossZoneCost, 0.001)
+}
+
+// The volumes an allocation lists carry their own costs, which the PV adjustment corrects with the
+// allocation's: otherwise an application's share of the unmounted volumes would be priced apart from
+// the entry that holds them.
+func TestAllocationData_ScalesVolumeCostsWithTheirAdjustment(t *testing.T) {
+	t.Parallel()
+
+	var got AllocationData
+	require.NoError(t, json.Unmarshal([]byte(`{
+		"pvCost": 10, "pvCostAdjustment": -2.5,
+		"pvs": {"cluster=c:name=pv-a": {"cost": 6}, "cluster=c:name=pv-b": {"cost": 4}}
+	}`), &got))
+
+	assert.InDelta(t, 7.5, got.PVCost, 1e-9)
+	assert.InDelta(t, 4.5, got.PVs["cluster=c:name=pv-a"].Cost, 1e-9)
+	assert.InDelta(t, 3.0, got.PVs["cluster=c:name=pv-b"].Cost, 1e-9)
+	assert.InDelta(t, got.PVCost, got.PVs["cluster=c:name=pv-a"].Cost+got.PVs["cluster=c:name=pv-b"].Cost, 1e-9)
 }

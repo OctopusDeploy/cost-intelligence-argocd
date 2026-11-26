@@ -42,6 +42,21 @@ func (d Destination) Local() bool {
 	return (d.Server == "" || d.Server == LocalServer) && (d.Name == "" || d.Name == LocalName)
 }
 
+// Scope says which cluster of the cost backend an Application's cost is read from, if any. OpenCost
+// measures only the cluster it runs in; Kubecost with an aggregator measures every cluster it knows.
+type Scope interface {
+	// ClusterFor returns the backend's name for the cluster dest deploys to, empty for the backend's
+	// own cluster, and false when the cost of what deploys there can't be measured.
+	ClusterFor(dest Destination) (id string, ok bool)
+}
+
+// LocalOnly is the Scope of a backend that measures only the cluster Argo CD runs in.
+type LocalOnly struct{}
+
+// ClusterFor measures the local cluster, and nothing elsewhere: a namespace of the same name here is
+// not the Application's.
+func (LocalOnly) ClusterFor(dest Destination) (string, bool) { return "", dest.Local() }
+
 // ApplicationLister lists every Argo CD Application in the cluster.
 type ApplicationLister interface {
 	List(ctx context.Context) ([]Application, error)
@@ -127,7 +142,7 @@ func parseApplication(object map[string]any) (Application, error) {
 
 	workloads := models.ManagedResources{}
 	seen := map[models.ManagedResource]bool{}
-	for _, w := range obj.Status.Resources.PodOwners() {
+	for _, w := range obj.Status.Resources.Measured() {
 		if w.Namespace == "" {
 			w.Namespace = obj.Spec.Destination.Namespace
 		}

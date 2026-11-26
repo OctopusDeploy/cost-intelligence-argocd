@@ -308,3 +308,77 @@ func TestGetDailyTimeSeries_ScopedToTheApplicationsControllers(t *testing.T) {
 	assert.InDelta(t, 1.27, whole[0].TotalCost, 1e-9)
 	assert.Equal(t, []string{"controller", "namespace"}, aggregates)
 }
+
+func TestPodAllocations_namespaceFallbackAndVirtualEntries(t *testing.T) {
+	t.Parallel()
+
+	// Kubecost keeps only the properties every entry shares, so a pod can come without a namespace;
+	// its idle and unmounted entries are not pods.
+	pods := &PodAllocations{namespace: "shop", resp: AllocationResponse{Data: []map[string]AllocationData{{
+		"web-1":         {CPUCost: 1, Properties: AllocationProperties{Pod: "web-1", Controller: "web", ControllerKind: "deployment"}},
+		"__idle__":      {CPUCost: 9},
+		"__unmounted__": {CPUCost: 5},
+	}}}}
+	resources := models.ManagedResources{{Kind: "Deployment", Name: "web", Namespace: "shop"}}
+
+	app := pods.ForApplication(resources)
+	require.Len(t, app.Pods, 1)
+	assert.Equal(t, "web-1", app.Pods[0].Name)
+	for _, p := range pods.Pods() {
+		assert.NotContains(t, p.Name, "__")
+	}
+}
+
+func TestForApplication_UnownedPodsGoToTheSoleApplicationOnly(t *testing.T) {
+	// Not parallel: the unowned pod labels are shared; the cleanup restores them.
+	t.Cleanup(models.ResetOwnership)
+	require.NoError(t, models.ConfigureUnownedPodLabels("runner.example.com/job"))
+
+	pods := &PodAllocations{namespace: "ci", resp: AllocationResponse{Data: []map[string]AllocationData{{
+		"web-1": {CPUCost: 1, Properties: AllocationProperties{Pod: "web-1", Controller: "web", ControllerKind: "deployment"}},
+		"job-1": {CPUCost: 4, Properties: AllocationProperties{Pod: "job-1", Labels: map[string]string{"runner_example_com_job": "x"}}},
+	}}}}
+	resources := models.ManagedResources{{Kind: "Deployment", Name: "web", Namespace: "ci"}}
+
+	shared := pods.ForApplication(resources)
+	require.Len(t, shared.Pods, 1, "with several applications in the namespace each would claim the job pod")
+
+	pods.SoleApplication(true)
+	alone := pods.ForApplication(resources)
+	assert.Len(t, alone.Pods, 2)
+}
+
+func TestForApplication_ApplicationsSharingANamespaceNeverClaimTheSamePods(t *testing.T) {
+	start := time.Date(2026, 10, 4, 0, 0, 0, 0, time.UTC)
+	alloc := func(pod, kind, controller string, cost float64, labels map[string]string) AllocationData {
+		return AllocationData{
+			Start: start, End: start.Add(24 * time.Hour), Minutes: 24 * 60, CPUCost: cost, TotalCost: cost,
+			Properties: AllocationProperties{Namespace: "shop", Pod: pod, ControllerKind: kind, Controller: controller, Labels: labels},
+		}
+	}
+	pods := &PodAllocations{
+		start: start, end: start.Add(24 * time.Hour),
+		resp: AllocationResponse{Data: []map[string]AllocationData{{
+			"web": alloc("web-1", "deployment", "web", 2, map[string]string{"app": "web"}),
+			"gen": alloc("gen-0", "statefulset", "chi-gen-0", 7, map[string]string{"app": "gen"}),
+			"db":  alloc("db-0", "statefulset", "chi-db-0", 11, map[string]string{"app": "db"}),
+		}}},
+	}
+	routes := models.ManagedResources{
+		{Kind: "HTTPRoute", Name: "web", Namespace: "shop"}, {Kind: "ScaledObject", Name: "gen", Namespace: "shop"}, {Kind: "Cluster", Name: "db", Namespace: "shop"},
+	}
+	web := models.ManagedResources{{Kind: "Deployment", Name: "web", Namespace: "shop"}, {Kind: "Gateway", Name: "gen", Namespace: "shop"}}
+
+	cost := func(own, peers models.ManagedResources) float64 {
+		pods.Peers(peers)
+		return pods.HourlyCostOf(own).CPU * 24
+	}
+
+	assert.InDelta(t, 20.0, cost(routes, nil), 1e-9, "without the peers, the route takes the Deployment's pod and the generated pod")
+	assert.InDelta(t, 11.0, cost(routes, web), 1e-9)
+	assert.InDelta(t, 2.0, cost(web, routes), 1e-9)
+
+	pods.Peers(web)
+	measured := pods.ForApplication(routes)
+	assert.InDelta(t, 11.0*30, measured.TotalMonthlyCost, 1e-9, "the application's measurement follows the same rule")
+}

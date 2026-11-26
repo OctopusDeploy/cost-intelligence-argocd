@@ -9,6 +9,7 @@ import (
 
 	"github.com/OctopusDeploy/cost-intelligence-argocd/pkg/exporter"
 	"github.com/OctopusDeploy/cost-intelligence-argocd/pkg/models"
+	"github.com/OctopusDeploy/cost-intelligence-argocd/pkg/opencost"
 	"github.com/OctopusDeploy/cost-intelligence-argocd/pkg/validation"
 )
 
@@ -51,8 +52,12 @@ type Recorder struct {
 	store    Store
 	source   Source
 	keepDays int
-	logger   *log.Logger
-	now      func() time.Time
+	// retentionDays is how far back the source can be asked for, 0 for no limit.
+	retentionDays int
+	logger        *log.Logger
+	now           func() time.Time
+	// scope says which cluster of the cost backend each Application is measured in.
+	scope exporter.Scope
 	// applications, when set, lists the Applications so those deploying elsewhere are skipped.
 	applications exporter.ApplicationLister
 	// pruneRemote deletes the stored cost of the Applications deploying elsewhere.
@@ -65,7 +70,7 @@ type Recorder struct {
 
 // NewRecorder returns a recorder that keeps keepDays days of history.
 func NewRecorder(store Store, source Source, keepDays int, logger *log.Logger) *Recorder {
-	return &Recorder{store: store, source: source, keepDays: keepDays, logger: logger, now: time.Now, wake: make(chan struct{}, 1)}
+	return &Recorder{store: store, source: source, keepDays: keepDays, logger: logger, now: time.Now, wake: make(chan struct{}, 1), scope: exporter.LocalOnly{}}
 }
 
 // RecordSoon asks Run to record again as soon as its current run, if any, is over, for applications
@@ -87,6 +92,39 @@ func (r *Recorder) OnRun(observe func(at time.Time, err error)) *Recorder {
 // A run whose list fails records every application, as without a lister, and deletes nothing.
 func (r *Recorder) WithApplications(applications exporter.ApplicationLister) *Recorder {
 	r.applications = applications
+	return r
+}
+
+// WithRetention tells the recorder the source answers only for the last days days, as the EKS-optimized
+// Kubecost does: no query reaches back further or spans more, and what is already stored is kept.
+func (r *Recorder) WithRetention(days int) *Recorder {
+	r.retentionDays = days
+	return r
+}
+
+// reach is the earliest day a query may ask for: earliest, or later when the source keeps less.
+func (r *Recorder) reach(now, earliest time.Time) time.Time {
+	if r.retentionDays <= 0 {
+		return earliest
+	}
+	limit := utcDay(now).AddDate(0, 0, -(r.retentionDays - 1))
+	if limit.After(earliest) {
+		return limit
+	}
+	return earliest
+}
+
+// chunk is the most days one query asks for.
+func (r *Recorder) chunk() int {
+	if r.retentionDays > 0 && r.retentionDays < chunkDays {
+		return r.retentionDays
+	}
+	return chunkDays
+}
+
+// WithScope has the recorder measure the clusters scope maps, instead of only the one Argo CD runs in.
+func (r *Recorder) WithScope(scope exporter.Scope) *Recorder {
+	r.scope = scope
 	return r
 }
 
@@ -130,7 +168,7 @@ func (r *Recorder) RecordOnce(ctx context.Context) error {
 	earliest := utcDay(now).AddDate(0, 0, -r.keepDays)
 
 	var errs []error
-	remote, err := r.remoteApplications(ctx)
+	remote, clusters, err := r.remoteApplications(ctx)
 	if err != nil {
 		// History keeps being recorded without the list, as before Applications were listed; only
 		// the deletes wait for a run that can list.
@@ -157,7 +195,7 @@ func (r *Recorder) RecordOnce(ctx context.Context) error {
 		if remote[app] {
 			continue
 		}
-		if err := r.recordApp(ctx, &records[i], earliest, last); err != nil {
+		if err := r.recordApp(opencost.WithCluster(ctx, clusters[app]), &records[i], r.reach(now, earliest), last); err != nil {
 			errs = append(errs, fmt.Errorf("%s: %w", app, err))
 		}
 	}
@@ -167,23 +205,27 @@ func (r *Recorder) RecordOnce(ctx context.Context) error {
 	return errors.Join(errs...)
 }
 
-// remoteApplications returns the Applications that deploy to another cluster, or none without a
-// lister. An Application missing from the list, one deleted since its last record, is not among them.
-func (r *Recorder) remoteApplications(ctx context.Context) (map[models.AppRef]bool, error) {
-	remote := map[models.AppRef]bool{}
+// remoteApplications returns the Applications whose cluster the cost backend doesn't measure, or none
+// without a lister, and the cluster of the backend each of the others is measured in. An Application
+// missing from the list, one deleted since its last record, is in neither.
+func (r *Recorder) remoteApplications(ctx context.Context) (remote map[models.AppRef]bool, clusters map[models.AppRef]string, err error) {
+	remote = map[models.AppRef]bool{}
+	clusters = map[models.AppRef]string{}
 	if r.applications == nil {
-		return remote, nil
+		return remote, clusters, nil
 	}
 	apps, err := r.applications.List(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to list applications: %w", err)
+		return nil, nil, fmt.Errorf("failed to list applications: %w", err)
 	}
 	for _, app := range apps {
-		if !app.Destination.Local() {
+		if id, ok := r.scope.ClusterFor(app.Destination); ok {
+			clusters[app.Ref] = id
+		} else {
 			remote[app.Ref] = true
 		}
 	}
-	return remote, nil
+	return remote, clusters, nil
 }
 
 // forget deletes the cost records and history of an application that deploys to another cluster.
@@ -227,8 +269,8 @@ func (r *Recorder) recordApp(ctx context.Context, record *models.CostActual, ear
 	if from.Before(earliest) {
 		from = earliest
 	}
-	for start := from; !start.After(last); start = start.AddDate(0, 0, chunkDays) {
-		end := minDay(start.AddDate(0, 0, chunkDays-1), last)
+	for start := from; !start.After(last); start = start.AddDate(0, 0, r.chunk()) {
+		end := minDay(start.AddDate(0, 0, r.chunk()-1), last)
 		days, err := r.fetch(ctx, target, start, end)
 		if err != nil {
 			return err
@@ -246,8 +288,8 @@ func (r *Recorder) recordApp(ctx context.Context, record *models.CostActual, ear
 // backfill records the days OpenCost still has, newest chunk first, and only then marks them
 // recorded: a backfill cut short starts over on the next run instead of leaving a hole.
 func (r *Recorder) backfill(ctx context.Context, target Target, scope string, earliest, last time.Time) error {
-	for end := last; !end.Before(earliest); end = end.AddDate(0, 0, -chunkDays) {
-		start := maxDay(end.AddDate(0, 0, -(chunkDays-1)), earliest)
+	for end := last; !end.Before(earliest); end = end.AddDate(0, 0, -r.chunk()) {
+		start := maxDay(end.AddDate(0, 0, -(r.chunk()-1)), earliest)
 		days, err := r.fetch(ctx, target, start, end)
 		if err != nil {
 			return err

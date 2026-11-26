@@ -11,7 +11,7 @@ import { StatStrip } from './StatStrip';
 import { useContainerWidth } from '../hooks/useContainerWidth';
 import { useDataQuality } from '../hooks/useDataQuality';
 import { cardStyle, Tokens, useTokens } from '../theme/tokens';
-import { CostData, CostTrend, DataQuality, Rightsizing } from '../utils/api';
+import { CostData, CostTrend, DataQuality, MonthCost, Rightsizing } from '../utils/api';
 import {
   changeDrivers,
   ChangeDrivers,
@@ -39,6 +39,8 @@ interface CostActualProps {
   managedControllers?: Set<string>;
   // rightsizing is the Vertical Pod Autoscaler's advice, which replaces the CPU suggestion when it has any.
   rightsizing?: Rightsizing | null;
+  // month is the calendar month so far and projected, from the daily history.
+  month?: MonthCost | null;
 }
 
 export const CostActual: React.FC<CostActualProps> = ({
@@ -49,6 +51,7 @@ export const CostActual: React.FC<CostActualProps> = ({
   onShowResources,
   managedControllers,
   rightsizing = null,
+  month = null,
 }) => {
   const t = useTokens();
   const quality = useDataQuality();
@@ -140,6 +143,15 @@ export const CostActual: React.FC<CostActualProps> = ({
                   ? "This app's workloads"
                   : 'Kubernetes workloads',
           },
+          ...(month
+            ? [
+                {
+                  label: 'This month',
+                  value: formatMoney(month.projected),
+                  detail: `${formatMoney(month.toDate)} so far, day ${month.daysElapsed} of ${month.daysInMonth}`,
+                },
+              ]
+            : []),
           {
             label: 'Since last sync',
             value: change ? <ChangeValue change={change} t={t} /> : '—',
