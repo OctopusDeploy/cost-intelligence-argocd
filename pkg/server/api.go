@@ -991,20 +991,22 @@ func (s *CostAPIServer) handleGetAppOrphanedPods(w http.ResponseWriter, r *http.
 		return
 	}
 	ctx, _ := s.placement(r.Context(), app)
-	s.writeOrphanedPods(w, r.WithContext(ctx), ns, resources, s.soleApplication(r.Context(), app, ns))
+	sole, peers := s.neighbours(r.Context(), app, ns)
+	s.writeOrphanedPods(w, r.WithContext(ctx), ns, resources, peers, sole)
 }
 
-// soleApplication reports whether app is the only Application deploying to namespace in its cluster,
-// which then owns the pods without a controller that carry an unowned pod label. Without the live
-// Application list it is no.
-func (s *CostAPIServer) soleApplication(ctx context.Context, app models.AppRef, namespace string) bool {
+// neighbours reports whether app is the only Application deploying to namespace in its cluster, which
+// then owns the pods without a controller that carry an unowned pod label, and returns the resources of
+// the others, which an owner label must not take pods from. Without the live Application list it is no
+// one and none.
+func (s *CostAPIServer) neighbours(ctx context.Context, app models.AppRef, namespace string) (bool, models.ManagedResources) {
 	if s.applications == nil {
-		return false
+		return false, nil
 	}
 	apps, err := s.applications.List(ctx)
 	if err != nil {
 		s.logger.Printf("Error listing Argo CD Applications to tell if %s is alone in %s: %v\n", app, namespace, err)
-		return false
+		return false, nil
 	}
 	for _, a := range apps {
 		if a.Ref != app {
@@ -1012,14 +1014,15 @@ func (s *CostAPIServer) soleApplication(ctx context.Context, app models.AppRef, 
 		}
 		cluster, _ := s.scope.ClusterFor(a.Destination)
 		sole, ok := exporter.SoleApplication(apps, s.scope, cluster, namespace)
-		return ok && sole == app
+		return ok && sole == app, exporter.PeerWorkloads(apps, s.scope, cluster, namespace, app)
 	}
-	return false
+	return false, nil
 }
 
-// writeOrphanedPods writes a namespace's orphaned pods, only those the resources own unless they are
-// nil. sole is whether the resources' application is alone in the namespace.
-func (s *CostAPIServer) writeOrphanedPods(w http.ResponseWriter, r *http.Request, ns string, resources models.ManagedResources, sole bool) {
+// writeOrphanedPods writes a namespace's orphaned pods, only those the resources own (by controller or
+// owner label, and with sole the unowned pods too) unless they are nil. sole is whether the resources'
+// application is alone in the namespace, and peers the resources of the others.
+func (s *CostAPIServer) writeOrphanedPods(w http.ResponseWriter, r *http.Request, ns string, resources, peers models.ManagedResources, sole bool) {
 	all, err := s.opencostCli.GetOrphanedPods(r.Context(), ns)
 	if err != nil {
 		s.logger.Printf("Error retrieving orphaned pods for namespace %s: %v\n", ns, err)
@@ -1035,7 +1038,7 @@ func (s *CostAPIServer) writeOrphanedPods(w http.ResponseWriter, r *http.Request
 			if podNS == "" {
 				podNS = ns
 			}
-			if resources.OwnsPodLabeled(podNS, p.ControllerKind, p.Controller, p.Name, p.Labels) ||
+			if resources.OwnsPodAmong(podNS, p.ControllerKind, p.Controller, p.Name, p.Labels, peers) ||
 				sole && resources.OwnsUnownedPod(podNS, p.ControllerKind, p.Controller, p.Labels) {
 				pods = append(pods, p)
 			}

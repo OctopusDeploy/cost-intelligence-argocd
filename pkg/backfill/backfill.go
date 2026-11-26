@@ -264,6 +264,7 @@ func (b *Backfill) measure(ctx context.Context, u unit, apps, all []exporter.App
 		if owners == nil {
 			owners = models.ManagedResources{}
 		}
+		measured.Peers(exporter.PeerWorkloads(all, b.scope, u.cluster, namespace, app.Ref))
 		actual := measured.Record(app.Ref, owners, time.Time{}, models.MeasuredOnInstall)
 		saved, err := b.store.SaveFirstActual(ctx, actual)
 		switch {

@@ -233,3 +233,25 @@ func TestCostActual_ForApplication(t *testing.T) {
 	assert.Nil(t, app.App, "the stored measurement is not sent twice")
 	assert.InDelta(t, 9.55, record.TotalMonthlyCost, 1e-9, "the record itself is unchanged")
 }
+
+func TestOwnsPodAmong_ALabelNeverTakesAPodAPeerOwns(t *testing.T) {
+	t.Parallel()
+
+	route := ManagedResources{{Kind: "HTTPRoute", Name: "web", Namespace: "shop"}}
+	deployment := ManagedResources{{Kind: "Deployment", Name: "web", Namespace: "shop"}}
+	gateway := ManagedResources{{Kind: "Gateway", Name: "web", Namespace: "shop"}}
+	labels := map[string]string{"app": "web"}
+
+	owns := func(rs, peers ManagedResources, kind, controller string) bool {
+		return rs.OwnsPodAmong("shop", kind, controller, "web-1", labels, peers)
+	}
+
+	assert.True(t, owns(route, nil, "deployment", "web"), "alone, the label matches")
+	assert.False(t, owns(route, deployment, "deployment", "web"), "a peer lists the pod's controller")
+	assert.True(t, owns(deployment, route, "deployment", "web"), "the controller's own application keeps it")
+	assert.True(t, owns(route, deployment, "statefulset", "chi-web-0"), "a pod no peer owns is matched by label")
+	assert.False(t, owns(route, gateway, "statefulset", "chi-web-0"), "two applications matching by label alone: neither owns it")
+	assert.False(t, owns(gateway, route, "statefulset", "chi-web-0"), "...from either side")
+	assert.True(t, IsWorkloadKind("Deployment"))
+	assert.False(t, IsWorkloadKind("HTTPRoute"))
+}

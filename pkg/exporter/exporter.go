@@ -284,6 +284,9 @@ func (e *Exporter) costSamples(ctx context.Context, apps []Application) []sample
 				complete = false
 				break
 			}
+			if p, ok := costs.(interface{ Peers(models.ManagedResources) }); ok {
+				p.Peers(PeerWorkloads(apps, e.scope, clusterOf(app), ns, app.Ref))
+			}
 			total = add(total, costs.HourlyCostOf(app.Workloads))
 		}
 		if !complete {
@@ -347,6 +350,30 @@ func appNamespaces(app Application) map[string]bool {
 		namespaces[w.Namespace] = true
 	}
 	return namespaces
+}
+
+// PeerWorkloads returns the pod-owning resources of the other Applications deploying to namespace in
+// cluster, which an owner label must not take pods from (models.ManagedResources.OwnsPodAmong).
+func PeerWorkloads(apps []Application, scope Scope, cluster, namespace string, self models.AppRef) models.ManagedResources {
+	peers := models.ManagedResources{}
+	for _, app := range apps {
+		if app.Ref == self {
+			continue
+		}
+		if id, ok := scope.ClusterFor(app.Destination); !ok || id != cluster {
+			continue
+		}
+		if app.Destination.Namespace != namespace && !appNamespaces(app)[namespace] {
+			continue
+		}
+		for _, w := range app.Workloads {
+			if w.Namespace == "" || w.Namespace == namespace {
+				// A claim owns no pod, so it keeps none from the others.
+				peers = append(peers, models.ManagedResources{w}.PodOwners()...)
+			}
+		}
+	}
+	return peers
 }
 
 // SoleApplication returns the Application that is the only one deploying to namespace in cluster, an
