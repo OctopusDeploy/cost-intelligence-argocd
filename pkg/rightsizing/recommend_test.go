@@ -338,3 +338,28 @@ func TestRecommend_GivesNoAdviceFromLessThanADayOfHistory(t *testing.T) {
 		})
 	}
 }
+
+func TestRecommend_ListsOnlyWorkloadsAndTheKindsAVPATargets(t *testing.T) {
+	t.Parallel()
+
+	resources := models.ManagedResources{
+		{Kind: "Deployment", Name: "web", Namespace: "shop"},
+		{Kind: "HTTPRoute", Name: "web", Namespace: "shop"},
+		{Kind: "ScaledObject", Name: "web", Namespace: "shop"},
+		{Kind: "Gateway", Name: "edge", Namespace: "shop"},
+		{Kind: "Cluster", Name: "db", Namespace: "shop"},
+	}
+	vpas := []VPA{
+		{TargetKind: "Deployment", TargetName: "web", UpdateMode: "Off", Containers: []ContainerRecommendation{rec("web", 0.1, 100)}},
+		{TargetKind: "Cluster", TargetName: "db", UpdateMode: "Off"},
+	}
+
+	result := Recommend("shop", resources, vpas, nil, now)
+
+	names := make([]string, 0, len(result.Workloads))
+	for _, w := range result.Workloads {
+		names = append(names, w.Kind+"/"+w.Name)
+	}
+	assert.Equal(t, []string{"Cluster/db", "Deployment/web"}, names,
+		"routes, gateways and KEDA objects own pods for cost but are no workload to size; a custom resource a VPA targets is")
+}
