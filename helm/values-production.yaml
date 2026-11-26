@@ -100,7 +100,7 @@ ingress:
       hosts:
         - cost-intel.prod.example.com
 
-nodeSelector: []
+nodeSelector: {}
 
 affinity:
   podAntiAffinity:

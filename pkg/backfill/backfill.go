@@ -246,6 +246,7 @@ func (b *Backfill) measure(ctx context.Context, namespace string, apps, all []ex
 		}
 		sole, ok := exporter.SoleApplication(all, namespace)
 		measured.SoleApplication(ok && sole == app.Ref)
+		measured.Peers(exporter.PeerWorkloads(all, namespace, app.Ref))
 		actual := measured.Record(app.Ref, owners, time.Time{}, models.MeasuredOnInstall)
 		saved, err := b.store.SaveFirstActual(ctx, actual)
 		switch {

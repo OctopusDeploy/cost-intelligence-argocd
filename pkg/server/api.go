@@ -774,28 +774,30 @@ func (s *CostAPIServer) handleGetAppOrphanedPods(w http.ResponseWriter, r *http.
 	if !ok {
 		return
 	}
-	s.writeOrphanedPods(w, r, ns, resources, s.soleApplication(r.Context(), app, ns))
+	sole, peers := s.neighbours(r.Context(), app, ns)
+	s.writeOrphanedPods(w, r, ns, resources, peers, sole)
 }
 
-// soleApplication reports whether app is the only Application deploying to namespace on this cluster,
-// and so owns the pods no application's controllers claim. An Application list that can't be read, or
-// none configured, is no.
-func (s *CostAPIServer) soleApplication(ctx context.Context, app models.AppRef, namespace string) bool {
+// neighbours reports whether app is the only Application deploying to namespace on this cluster, and so
+// owns the pods no application's controllers claim, and returns the resources of the others, which an
+// owner label must not take pods from. An Application list that can't be read, or none configured,
+// is no one and none.
+func (s *CostAPIServer) neighbours(ctx context.Context, app models.AppRef, namespace string) (bool, models.ManagedResources) {
 	if s.applications == nil {
-		return false
+		return false, nil
 	}
 	apps, err := s.applications.List(ctx)
 	if err != nil {
 		s.logger.Printf("Warning: listing Applications for %s: %v\n", namespace, err)
-		return false
+		return false, nil
 	}
 	sole, ok := exporter.SoleApplication(apps, namespace)
-	return ok && sole == app
+	return ok && sole == app, exporter.PeerWorkloads(apps, namespace, app)
 }
 
 // writeOrphanedPods writes a namespace's orphaned pods, only those the resources own (by controller or
 // owner label, and with sole the unowned pods too) unless they are nil.
-func (s *CostAPIServer) writeOrphanedPods(w http.ResponseWriter, r *http.Request, ns string, resources models.ManagedResources, sole bool) {
+func (s *CostAPIServer) writeOrphanedPods(w http.ResponseWriter, r *http.Request, ns string, resources, peers models.ManagedResources, sole bool) {
 	all, err := s.opencostCli.GetOrphanedPods(r.Context(), ns)
 	if err != nil {
 		s.logger.Printf("Error retrieving orphaned pods for namespace %s: %v\n", ns, err)
@@ -807,7 +809,7 @@ func (s *CostAPIServer) writeOrphanedPods(w http.ResponseWriter, r *http.Request
 	if resources != nil {
 		pods = []models.OrphanedPod{}
 		for _, p := range all {
-			if resources.OwnsPodLabeled(p.Namespace, p.ControllerKind, p.Controller, p.Name, p.Labels) ||
+			if resources.OwnsPodAmong(p.Namespace, p.ControllerKind, p.Controller, p.Name, p.Labels, peers) ||
 				sole && resources.OwnsUnownedPod(p.Namespace, p.ControllerKind, p.Controller, p.Labels) {
 				pods = append(pods, p)
 			}

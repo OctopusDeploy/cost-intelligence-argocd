@@ -8,6 +8,8 @@ All notable changes to this project are listed here. The format follows [Keep a 
 
 - Pods of operator-generated workloads are attributed to the custom resource Argo CD lists, by the pod's labels: a list of built-in owner labels (ClickHouse, CloudNativePG, Strimzi, Elastic, OpenTelemetry operator, the `app`/`app.kubernetes.io/*`/`release` labels) and `OWNER_LABELS` (Helm `costIntelligence.ownerLabels`) for others. Pods of any resource kind are matched, not an allowlist; `NON_OWNER_KINDS` (`costIntelligence.nonOwnerKinds`) names kinds that never own pods.
 - Pods with no controller (bare pods, such as GitLab Runner's CI job pods or Airflow's executor pods) are charged to the only Application deployed in their namespace when they carry one of `UNOWNED_POD_LABELS` (`costIntelligence.unownedPodLabels`). Off by default. With several Applications in the namespace they stay in the namespace's cost. Each pod is counted once.
+- Two Applications in one namespace never claim the same pod: a pod an owner label would give to an Application is left alone when another Application of the namespace owns it, by its controller or by a label too. A pod that only labels match, for several Applications, stays in the namespace.
+- Rightsizing lists workloads only (Deployments, StatefulSets, Rollouts, ...), plus any other kind a VPA targets, not the routes, gateways and KEDA objects an Application also lists.
 - `UNMANAGED_GROUP_LABELS` (`costIntelligence.unmanagedGroupLabels`, off by default) groups pods in the namespace view and in an application's pod list, so CI job pods read per team and project. Presentation only.
 
 ## [0.2.0] - 2026-11-05

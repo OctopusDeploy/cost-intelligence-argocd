@@ -259,6 +259,9 @@ func (e *Exporter) costSamples(ctx context.Context, apps []Application) []sample
 				complete = false
 				break
 			}
+			if p, ok := costs.(interface{ Peers(models.ManagedResources) }); ok {
+				p.Peers(PeerWorkloads(apps, ns, app.Ref))
+			}
 			total = add(total, costs.HourlyCostOf(app.Workloads))
 		}
 		if !complete {
@@ -322,6 +325,26 @@ func appNamespaces(app Application) map[string]bool {
 		namespaces[w.Namespace] = true
 	}
 	return namespaces
+}
+
+// PeerWorkloads returns the pod-owning resources of the other Applications deploying to namespace on
+// this cluster, which an owner label must not take pods from (models.ManagedResources.OwnsPodAmong).
+func PeerWorkloads(apps []Application, namespace string, self models.AppRef) models.ManagedResources {
+	peers := models.ManagedResources{}
+	for _, app := range apps {
+		if app.Ref == self || !app.Destination.Local() {
+			continue
+		}
+		if app.Destination.Namespace != namespace && !appNamespaces(app)[namespace] {
+			continue
+		}
+		for _, w := range app.Workloads {
+			if w.Namespace == "" || w.Namespace == namespace {
+				peers = append(peers, w)
+			}
+		}
+	}
+	return peers
 }
 
 func add(a, b opencost.HourlyCost) opencost.HourlyCost {

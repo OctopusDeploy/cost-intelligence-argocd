@@ -347,7 +347,14 @@ type PodAllocations struct {
 	// soleApplication says the application measured is the only one deploying to the namespace, so it
 	// also owns the pods no application's controllers claim (see models.ConfigureUnownedPodLabels).
 	soleApplication bool
+	// peers are the pod-owning resources of the other applications deploying to the namespace, which
+	// keep a pod from being claimed by an owner label as well (models.ManagedResources.OwnsPodAmong).
+	peers models.ManagedResources
 }
+
+// Peers sets the resources of the other applications deploying to the namespace. It is set before
+// each application is measured, as it differs from one application to the next.
+func (p *PodAllocations) Peers(peers models.ManagedResources) { p.peers = peers }
 
 // SoleApplication says whether the application measured next is the only one deploying to the
 // namespace. It is meant to be set once, before the pods are read.
@@ -547,7 +554,7 @@ func (p *PodAllocations) Namespace() *models.OpenCostMetrics {
 // pods ran rather than the namespace's, so a new application in an older namespace is not
 // under-reported.
 func (p *PodAllocations) ForApplication(resources models.ManagedResources) *models.AppMeasurement {
-	owned := ownedAllocations(p.resp, resources, p.soleApplication)
+	owned := ownedAllocations(p.resp, resources, p.peers, p.soleApplication)
 	metrics := parseOpenCostResponse(owned, p.start, p.end)
 	// The raw allocations are already stored once, with the namespace's measurement.
 	metrics.ResourceDetails = nil
@@ -581,7 +588,7 @@ func (p *PodAllocations) HourlyCostOf(resources models.ManagedResources) HourlyC
 	if hours <= 0 {
 		return cost
 	}
-	for _, allocations := range ownedAllocations(p.resp, resources, p.soleApplication).Data {
+	for _, allocations := range ownedAllocations(p.resp, resources, p.peers, p.soleApplication).Data {
 		for _, a := range allocations {
 			cost.CPU += a.CPUCost
 			cost.Memory += a.RAMCost
@@ -600,9 +607,10 @@ func (p *PodAllocations) HourlyCostOf(resources models.ManagedResources) HourlyC
 }
 
 // ownedAllocations keeps the pod allocations the resources own, by their controllers and by the
-// owner labels of their pods, dropping OpenCost's virtual entries. With sole, it keeps the pods no
+// owner labels of their pods (unless a peer, another application of the namespace, owns them too),
+// dropping OpenCost's virtual entries. With sole, it keeps the pods no
 // application's controllers claim too (models.ManagedResources.OwnsUnownedPod).
-func ownedAllocations(resp AllocationResponse, resources models.ManagedResources, sole bool) AllocationResponse {
+func ownedAllocations(resp AllocationResponse, resources, peers models.ManagedResources, sole bool) AllocationResponse {
 	owned := AllocationResponse{Code: resp.Code, Data: make([]map[string]AllocationData, 0, len(resp.Data))}
 	for _, allocations := range resp.Data {
 		kept := make(map[string]AllocationData)
@@ -615,7 +623,7 @@ func ownedAllocations(resp AllocationResponse, resources models.ManagedResources
 				pod = key
 			}
 			props := alloc.Properties
-			if resources.OwnsPodLabeled(props.Namespace, props.ControllerKind, props.Controller, pod, props.Labels) ||
+			if resources.OwnsPodAmong(props.Namespace, props.ControllerKind, props.Controller, pod, props.Labels, peers) ||
 				sole && resources.OwnsUnownedPod(props.Namespace, props.ControllerKind, props.Controller, props.Labels) {
 				kept[key] = alloc
 			}
