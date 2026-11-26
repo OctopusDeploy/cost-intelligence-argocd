@@ -1,0 +1,12 @@
+{{- if include "cost-intelligence-argocd.clusterMap.enabled" . }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "cost-intelligence-argocd.fullname" . }}-clusters
+  namespace: {{ .Values.namespace.name }}
+  labels:
+    {{- include "cost-intelligence-argocd.labels" . | nindent 4 }}
+data:
+  clusters.json: |
+    {{- include "cost-intelligence-argocd.clusterMap.json" . | nindent 4 }}
+{{- end }}

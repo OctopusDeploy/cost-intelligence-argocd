@@ -47,18 +47,21 @@ type CostStorage interface {
 	// GetActualsInDateRange retrieves an application's cost records within a date range
 	GetActualsInDateRange(ctx context.Context, app models.AppRef, startTime, endTime time.Time) ([]models.CostActual, error)
 
-	// GetNamespaceCostSummary returns the average monthly cost of a deployment namespace over the
-	// last `days` days: each day counts once, at its latest measurement, however many apps deploy there.
-	GetNamespaceCostSummary(ctx context.Context, namespace string, days int) (float64, error)
+	// GetNamespaceCostSummary returns the average monthly cost of a deployment namespace of a cluster
+	// over the last `days` days: each day counts once, at its latest measurement, however many apps
+	// deploy there. cluster is the cost backend's cluster id (empty for the backend's own); records
+	// stored before the cluster was recorded have none and match any.
+	GetNamespaceCostSummary(ctx context.Context, cluster, namespace string, days int) (float64, error)
 
 	// ListNamespaces returns each deployment namespace's cost and idle cost from its most recent
-	// measurement, with the number of applications currently deploying to it. A namespace shared by
-	// several applications is counted once. The idle cost is nil when that measurement did not measure it.
+	// measurement, with the number of applications currently deploying to it. A namespace is its cluster
+	// and name, so one name on two clusters is two rows; a namespace shared by several applications is
+	// counted once. The idle cost is nil when that measurement did not measure it.
 	ListNamespaces(ctx context.Context) ([]models.NamespaceSummary, error)
 
-	// GetLatestActualsForNamespace returns the most recent CostActual for each
-	// application in the given deployment namespace.
-	GetLatestActualsForNamespace(ctx context.Context, namespace string) ([]models.CostActual, error)
+	// GetLatestActualsForNamespace returns the most recent CostActual for each application in the
+	// given deployment namespace of a cluster (see GetNamespaceCostSummary for cluster).
+	GetLatestActualsForNamespace(ctx context.Context, cluster, namespace string) ([]models.CostActual, error)
 
 	// GetRecentActuals returns up to limit recent cost records for an application,
 	// ordered by measured_at DESC. Used for rolling-average anomaly detection.

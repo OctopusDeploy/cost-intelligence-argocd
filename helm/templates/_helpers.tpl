@@ -181,3 +181,19 @@ The Helm repository the service serves the access Application's empty chart from
 {{- define "cost-intelligence-argocd.accessApplication.repoURL" -}}
 {{- printf "http://%s.%s.svc.cluster.local:%v/charts" (include "cost-intelligence-argocd.fullname" .) .Values.namespace.name .Values.costIntelligence.port }}
 {{- end }}
+
+{{/*
+"true" when Argo CD's other clusters are mapped onto Kubecost cluster names (openCost.kubecostClusters).
+*/}}
+{{- define "cost-intelligence-argocd.clusterMap.enabled" -}}
+{{- if and (eq (.Values.openCost.provider | default "opencost") "kubecost") .Values.openCost.kubecostClusters -}}
+true
+{{- end -}}
+{{- end }}
+
+{{/*
+The cluster map the service reads (KUBECOST_CLUSTER_MAP_FILE).
+*/}}
+{{- define "cost-intelligence-argocd.clusterMap.json" -}}
+{{- dict "clusters" .Values.openCost.kubecostClusters | toPrettyJson -}}
+{{- end }}
